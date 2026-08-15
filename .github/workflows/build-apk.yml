@@ -1,0 +1,109 @@
+name: Build OpenWrt APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  OPENWRT_VERSION: "25.12.4"
+  TARGET: "mediatek"
+  SUBTARGET: "filogic"
+  ARCH: "aarch64_cortex-a53"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download OpenWrt SDK
+        run: |
+          wget -q \
+            https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/openwrt-sdk-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}_x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+
+      - name: Extract SDK
+        run: |
+          tar --zstd -xf openwrt-sdk-*.tar.zst
+          echo "SDK=$(find "$PWD" -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -1)" >> "$GITHUB_ENV"
+
+      - name: Copy packages
+        run: |
+          mkdir -p "$SDK/package/apcontroller"
+          mkdir -p "$SDK/package/luci-app-apcontroller"
+
+          cp -a apcontroller/. "$SDK/package/apcontroller/"
+          cp -a luci-app-apcontroller/. "$SDK/package/luci-app-apcontroller/"
+
+      - name: Update feeds
+        working-directory: ${{ env.SDK }}
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure
+        working-directory: ${{ env.SDK }}
+        run: |
+          make defconfig
+
+      - name: Build apcontroller
+        working-directory: ${{ env.SDK }}
+        run: |
+          make package/apcontroller/compile V=s
+
+      - name: Build luci-app-apcontroller
+        working-directory: ${{ env.SDK }}
+        run: |
+          make package/luci-app-apcontroller/compile V=s
+
+      - name: Collect APKs
+        run: |
+          mkdir -p feed/${ARCH}
+
+          find "$SDK/bin/packages" \
+            -type f \
+            -name '*.apk' \
+            \( \
+              -name 'apcontroller-*.apk' \
+              -o \
+              -name 'luci-app-apcontroller-*.apk' \
+            \) \
+            -exec cp {} feed/${ARCH}/ \;
+
+          ls -lah feed/${ARCH}
+
+      - name: Generate APK repository index
+        run: |
+          APK=$(find "$SDK/staging_dir/host/bin" -name apk -type f | head -1)
+
+          cd feed/${ARCH}
+
+          "$APK" mkndx \
+            --root . \
+            --keys-dir . \
+            --allow-untrusted \
+            --output packages.adb \
+            *.apk
+
+          ls -lah
+
+      - name: Commit feed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add feed/${ARCH}
+
+          if git diff --cached --quiet; then
+            echo "No feed changes"
+            exit 0
+          fi
+
+          git commit -m "Build OpenWrt ${OPENWRT_VERSION} APK feed"
+          git push
