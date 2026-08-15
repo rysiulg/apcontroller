@@ -5,6 +5,7 @@
 #
 
 SSHOPTIONS="-o StrictHostKeyChecking=accept-new"
+SCPOPTIONS="-O"
 
 SEC=$1
 [ -z "$SEC" ] && exit 0
@@ -23,6 +24,7 @@ T=$(uci -q get apcontroller."$SEC")
 
 HOSTS=$(uci -q get apcontroller."$SEC".host)
 [ -z "$HOSTS" ] && exit 0
+
 WIFIS=$(uci -q get apcontroller."$SEC".wifi)
 [ -z "$WIFIS" ] && exit 0
 
@@ -32,11 +34,13 @@ DELETE=$(uci -q get apcontroller."$SEC".delete)
 [ "x$DELETE" = "x1" ] && json_add_int "delete" 1
 
 json_add_array "wifis"
+
 for WIFI in $WIFIS; do
 	BANDS="$(uci -q get apcontroller."$WIFI".band)"
 	MACFILTER="$(uci -q get apcontroller."$WIFI".macfilter)"
 	[ -z "$MACFILTER" ] && MACFILTER="disable"
 	MACLIST="$(uci -q get apcontroller."$WIFI".maclist)"
+
 	for BAND in $BANDS; do
 		json_add_object
 		json_add_int "enabled" "$(uci -q get apcontroller."$WIFI".enabled)"
@@ -48,66 +52,193 @@ for WIFI in $WIFIS; do
 		json_add_int "isolate" "$(uci -q get apcontroller."$WIFI".isolate)"
 		json_add_string "network" "$(uci -q get apcontroller."$WIFI".network)"
 		json_add_string "macfilter" "$MACFILTER"
+
 		json_add_array "maclist"
+
 		for MAC in $MACLIST; do
 			MAC="$(echo "$MAC" | tr '[:lower:]' '[:upper:]')"
 			json_add_string "" "$MAC"
 		done
+
 		json_close_array
 		json_close_object
 	done
 done
+
 json_close_array
 
-json_dump > ${BASEPATH}/cmds-${SEC}
+json_dump > "${BASEPATH}/cmds-${SEC}"
 
 USEAS=$(uci -q get apcontroller."$SEC".useadditionalscript)
 
 for HOST in $HOSTS; do
+
 	enabled=$(uci -q get apcontroller."$HOST".enabled)
 	[ "$enabled" -eq 1 ] || continue
 
 	ipaddr=$(uci -q get apcontroller."$HOST".ipaddr)
-	[ -z "$ipaddr" ] && continue
+	[ -n "$ipaddr" ] || continue
+
 	port=$(uci -q get apcontroller."$HOST".port)
-	[ -z "$port" ] && port=22
+	[ -n "$port" ] || port=22
+
 	username=$(uci -q get apcontroller."$HOST".username)
-	[ -z "$username" ] && continue
+	[ -n "$username" ] || continue
+
 	password=$(uci -q get apcontroller."$HOST".password)
 
 	usekeyfile=$(uci -q get apcontroller."$HOST".usekeyfile)
 	keyfile=$(uci -q get apcontroller."$HOST".keyfile)
+	[ -n "$keyfile" ] || keyfile="/root/.ssh/id_dropbear"
+
+	#
+	# Opcje dodatkowe SSH dla konkretnego AP.
+	#
+	# Np. dla starego Ubi:
+	# option sshoptions '-c aes128-ctr'
+	#
+	sshoptions=$(uci -q get apcontroller."$HOST".sshoptions)
+
+	#
+	# -O wymusza klasyczny SCP zamiast SFTP.
+	#
+	scpoptions=$(uci -q get apcontroller."$HOST".scpoptions)
+	[ -n "$scpoptions" ] || scpoptions="$SCPOPTIONS"
+
+	T=1
 
 	if [ "x$usekeyfile" = "x1" ] && [ -e "$keyfile" ]; then
+
 		if [ "x$USEAS" = "x1" ]; then
-			scp -i ${keyfile} ${SSHOPTIONS} -P ${port} /usr/share/apcontroller/apcontroller.user ${username}@${ipaddr}:/tmp 2>/dev/null
-			scp -i ${keyfile} ${SSHOPTIONS} -P ${port} /usr/share/apcontroller/apcontroller-agent-as ${username}@${ipaddr}:/tmp 2>/dev/null
+
+			scp \
+				-i "$keyfile" \
+				${SSHOPTIONS} \
+				${scpoptions} \
+				-P "$port" \
+				/usr/share/apcontroller/apcontroller.user \
+				"${username}@${ipaddr}:/tmp" \
+				2>/dev/null
+
+			scp \
+				-i "$keyfile" \
+				${SSHOPTIONS} \
+				${scpoptions} \
+				-P "$port" \
+				/usr/share/apcontroller/apcontroller-agent-as \
+				"${username}@${ipaddr}:/tmp" \
+				2>/dev/null
 		fi
-		scp -i ${keyfile} ${SSHOPTIONS} -P ${port} ${BASEPATH}/cmds-${SEC} ${username}@${ipaddr}:/tmp 2>/dev/null
-		[ $? -eq 0 ] && scp -i ${keyfile} ${SSHOPTIONS} -P ${port} /usr/share/apcontroller/apcontroller-agent-setconfig ${username}@${ipaddr}:/tmp 2>/dev/null
-		[ $? -eq 0 ] && ssh -q -i ${keyfile} ${SSHOPTIONS} -p ${port} ${username}@${ipaddr} "/tmp/apcontroller-agent-setconfig /tmp/cmds-${SEC}" >/dev/null 2>&1
-		T=$?
+
+		scp \
+			-i "$keyfile" \
+			${SSHOPTIONS} \
+			${scpoptions} \
+			-P "$port" \
+			"${BASEPATH}/cmds-${SEC}" \
+			"${username}@${ipaddr}:/tmp" \
+			2>/dev/null
+
+		if [ $? -eq 0 ]; then
+			scp \
+				-i "$keyfile" \
+				${SSHOPTIONS} \
+				${scpoptions} \
+				-P "$port" \
+				/usr/share/apcontroller/apcontroller-agent-setconfig \
+				"${username}@${ipaddr}:/tmp" \
+				2>/dev/null
+		fi
+
+		if [ $? -eq 0 ]; then
+			ssh \
+				-q \
+				-i "$keyfile" \
+				${SSHOPTIONS} \
+				${sshoptions} \
+				-p "$port" \
+				"${username}@${ipaddr}" \
+				"/tmp/apcontroller-agent-setconfig /tmp/cmds-${SEC}" \
+				>/dev/null 2>&1
+
+			T=$?
+		else
+			T=1
+		fi
+
 	else
+
 		if [ "x$USEAS" = "x1" ]; then
-			sshpass -p "${password}" scp ${SSHOPTIONS} -P ${port} /usr/share/apcontroller/apcontroller.user ${username}@${ipaddr}:/tmp 2>/dev/null
-			sshpass -p "${password}" scp ${SSHOPTIONS} -P ${port} /usr/share/apcontroller/apcontroller-agent-as ${username}@${ipaddr}:/tmp 2>/dev/null
+
+			sshpass -p "$password" \
+				scp \
+				${SSHOPTIONS} \
+				${scpoptions} \
+				-P "$port" \
+				/usr/share/apcontroller/apcontroller.user \
+				"${username}@${ipaddr}:/tmp" \
+				2>/dev/null
+
+			sshpass -p "$password" \
+				scp \
+				${SSHOPTIONS} \
+				${scpoptions} \
+				-P "$port" \
+				/usr/share/apcontroller/apcontroller-agent-as \
+				"${username}@${ipaddr}:/tmp" \
+				2>/dev/null
 		fi
-		sshpass -p "${password}" scp ${SSHOPTIONS} -P ${port} ${BASEPATH}/cmds-${SEC} ${username}@${ipaddr}:/tmp 2>/dev/null
-		[ $? -eq 0 ] && sshpass -p "${password}" scp ${SSHOPTIONS} -P ${port} /usr/share/apcontroller/apcontroller-agent-setconfig ${username}@${ipaddr}:/tmp 2>/dev/null
-		[ $? -eq 0 ] && sshpass -p "${password}" ssh -q ${SSHOPTIONS} -p ${port} ${username}@${ipaddr} "/tmp/apcontroller-agent-setconfig /tmp/cmds-${SEC}" >/dev/null 2>&1
-		T=$?
+
+		sshpass -p "$password" \
+			scp \
+			${SSHOPTIONS} \
+			${scpoptions} \
+			-P "$port" \
+			"${BASEPATH}/cmds-${SEC}" \
+			"${username}@${ipaddr}:/tmp" \
+			2>/dev/null
+
+		if [ $? -eq 0 ]; then
+			sshpass -p "$password" \
+				scp \
+				${SSHOPTIONS} \
+				${scpoptions} \
+				-P "$port" \
+				/usr/share/apcontroller/apcontroller-agent-setconfig \
+				"${username}@${ipaddr}:/tmp" \
+				2>/dev/null
+		fi
+
+		if [ $? -eq 0 ]; then
+			sshpass -p "$password" \
+				ssh \
+				-q \
+				${SSHOPTIONS} \
+				${sshoptions} \
+				-p "$port" \
+				"${username}@${ipaddr}" \
+				"/tmp/apcontroller-agent-setconfig /tmp/cmds-${SEC}" \
+				>/dev/null 2>&1
+
+			T=$?
+		else
+			T=1
+		fi
 	fi
+
 	if [ -n "$VERBOSE" ]; then
 		if [ "$T" -eq 0 ]; then
 			RET="OK"
 		else
 			RET="ERROR"
 		fi
+
 		NAME=$(uci -q get apcontroller."$HOST".name)
 		echo "${NAME} (${ipaddr}): ${RET}"
 	fi
+
 done
 
-rm ${BASEPATH}/cmds-${SEC} 2>/dev/null
+rm -f "${BASEPATH}/cmds-${SEC}" 2>/dev/null
 
 exit 0
