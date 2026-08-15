@@ -22,78 +22,136 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # ------------------------------------------------------------
+      # APK signing key
+      # ------------------------------------------------------------
 
       - name: Prepare APK signing key
         run: |
           mkdir -p keys
 
-          if [ -f keys/apcontroller.rsa ]; then
-            echo "Existing signing key found."
+          if [ -f keys/apcontroller.rsa ] && [ -f keys/apcontroller.rsa.pub ]; then
+            echo "Signing key already exists"
           else
-            echo "No signing key found - generating one."
+            echo "Signing key does not exist - generating it"
 
-            openssl ecparam \
-              -name prime256v1 \
-              -genkey \
-              -noout \
-              -out keys/apcontroller.rsa
+            wget -q \
+              https://github.com/openwrt/apk-tools/releases/latest/download/apk-tools-static-x86_64.tar.gz \
+              -O /tmp/apk-tools.tar.gz
 
-            chmod 600 keys/apcontroller.rsa
+            mkdir -p /tmp/apk-tools
+            tar -xzf /tmp/apk-tools.tar.gz -C /tmp/apk-tools
 
-            openssl ec \
-              -in keys/apcontroller.rsa \
-              -pubout \
-              -out keys/apcontroller.rsa.pub
+            APK=$(find /tmp/apk-tools -type f -name apk | head -1)
 
-            echo "Signing key generated."
+            "$APK" keygen \
+              --algorithm rsa \
+              --name apcontroller \
+              --output keys/apcontroller.rsa
+
+            ls -lah keys
           fi
 
-          test -s keys/apcontroller.rsa
-          test -s keys/apcontroller.rsa.pub
+      # ------------------------------------------------------------
+      # Check whether packages already exist
+      # ------------------------------------------------------------
 
-          echo "Public key:"
-          cat keys/apcontroller.rsa.pub
+      - name: Check existing APKs
+        id: check
+        run: |
+          mkdir -p feed/${ARCH}
+
+          AP=$(find feed/${ARCH} -maxdepth 1 \
+            -type f \
+            -name 'apcontroller-*.apk' \
+            | head -1)
+
+          LUCI=$(find feed/${ARCH} -maxdepth 1 \
+            -type f \
+            -name 'luci-app-apcontroller-*.apk' \
+            | head -1)
+
+          if [ -n "$AP" ] && [ -n "$LUCI" ]; then
+            echo "Both APKs already exist:"
+            echo "  $AP"
+            echo "  $LUCI"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "APK missing - build required"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ------------------------------------------------------------
+      # SDK is downloaded ONLY when package must be built
+      # ------------------------------------------------------------
 
       - name: Download OpenWrt SDK
+        if: steps.check.outputs.build == 'true'
         run: |
           wget -q \
             https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/openwrt-sdk-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}_gcc-14.3.0_musl.Linux-x86_64.tar.zst
 
       - name: Extract SDK
+        if: steps.check.outputs.build == 'true'
         run: |
           tar --zstd -xf openwrt-sdk-*.tar.zst
-          echo "SDK=$(find "$PWD" -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -1)" >> "$GITHUB_ENV"
+
+          echo "SDK=$(find "$PWD" \
+            -maxdepth 1 \
+            -type d \
+            -name 'openwrt-sdk-*' \
+            | head -1)" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------
+      # Build packages
+      # ------------------------------------------------------------
 
       - name: Copy packages
+        if: steps.check.outputs.build == 'true'
         run: |
           mkdir -p "$SDK/package/apcontroller"
           mkdir -p "$SDK/package/luci-app-apcontroller"
 
-          cp -a apcontroller/. "$SDK/package/apcontroller/"
-          cp -a luci-app-apcontroller/. "$SDK/package/luci-app-apcontroller/"
+          cp -a apcontroller/. \
+            "$SDK/package/apcontroller/"
+
+          cp -a luci-app-apcontroller/. \
+            "$SDK/package/luci-app-apcontroller/"
 
       - name: Update feeds
+        if: steps.check.outputs.build == 'true'
         working-directory: ${{ env.SDK }}
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: Configure
+        if: steps.check.outputs.build == 'true'
         working-directory: ${{ env.SDK }}
         run: |
           make defconfig
 
       - name: Build apcontroller
+        if: steps.check.outputs.build == 'true'
         working-directory: ${{ env.SDK }}
         run: |
           make package/apcontroller/compile V=s
 
       - name: Build luci-app-apcontroller
+        if: steps.check.outputs.build == 'true'
         working-directory: ${{ env.SDK }}
         run: |
           make package/luci-app-apcontroller/compile V=s
 
+      # ------------------------------------------------------------
+      # Collect APKs
+      # ------------------------------------------------------------
+
       - name: Collect APKs
+        if: steps.check.outputs.build == 'true'
         run: |
           mkdir -p feed/${ARCH}
 
@@ -109,41 +167,65 @@ jobs:
 
           ls -lah feed/${ARCH}
 
+      # ------------------------------------------------------------
+      # Generate repository index
+      # ------------------------------------------------------------
+
       - name: Generate APK repository index
         run: |
-          APK=$(find "$SDK/staging_dir/host/bin" -name apk -type f | head -1)
+          mkdir -p feed/${ARCH}
 
-          test -n "$APK"
-          test -x "$APK"
+          if [ -n "${SDK:-}" ]; then
+            APK=$(find "$SDK/staging_dir/host/bin" \
+              -name apk \
+              -type f \
+              | head -1)
+          fi
+
+          if [ -z "${APK:-}" ]; then
+            APK=$(find /usr/bin /usr/local/bin /opt \
+              -type f \
+              -name apk \
+              2>/dev/null \
+              | head -1)
+          fi
+
+          if [ -z "${APK:-}" ]; then
+            echo "ERROR: apk tool not found"
+            exit 1
+          fi
+
+          echo "Using APK: $APK"
 
           cd feed/${ARCH}
 
           "$APK" mkndx \
-            --allow-untrusted \
-            --sign-key "$GITHUB_WORKSPACE/keys/apcontroller.rsa" \
+            --root . \
+            --keys-dir ../../keys \
+            --sign ../../keys/apcontroller.rsa \
             --output packages.adb \
-            ./*.apk
+            *.apk
 
           ls -lah
 
-      - name: Commit feed and signing key
+      # ------------------------------------------------------------
+      # Publish
+      # ------------------------------------------------------------
+
+      - name: Commit and push feed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add \
-            feed/${ARCH} \
-            keys/apcontroller.rsa \
-            keys/apcontroller.rsa.pub
+          git add feed/${ARCH} keys
 
           if git diff --cached --quiet; then
             echo "No feed changes"
             exit 0
           fi
 
-          git commit -m "Build OpenWrt ${OPENWRT_VERSION} APK feed"
+          git commit -m "Update OpenWrt APK feed"
 
-          git fetch origin main
-          git rebase origin/main
+          git pull --rebase origin main
 
           git push origin HEAD:main
