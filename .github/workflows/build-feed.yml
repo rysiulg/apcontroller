@@ -1,0 +1,78 @@
+name: Build APController APK feed
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.actor != 'github-actions[bot]'
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        arch:
+          - x86_64
+          - aarch64_cortex-a53
+          - mips_24kc
+          - ramips_mt7621
+          - ath79_generic
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build APK packages
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.arch }}
+          PACKAGES: apcontroller luci-app-apcontroller
+          INDEX: 1
+          NO_SHFMT_CHECK: 1
+
+      - name: Publish feed to main
+        run: |
+          set -e
+
+          FEED="feed/${{ matrix.arch }}"
+          OUT="bin/packages/${{ matrix.arch }}/action"
+
+          mkdir -p "$FEED"
+
+          rm -f "$FEED"/*.apk
+          rm -f "$FEED"/packages.adb
+          rm -f "$FEED"/packages.adb.gz
+          rm -f "$FEED"/packages.adb.asc
+
+          cp "$OUT"/*.apk "$FEED"/
+          cp "$OUT"/packages.adb "$FEED"/
+
+          if [ -f "$OUT/packages.adb.asc" ]; then
+            cp "$OUT/packages.adb.asc" "$FEED"/
+          fi
+
+          echo "Feed:"
+          find "$FEED" -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Commit feed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add feed/
+
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+
+          git commit -m "Update APK feed: ${{ matrix.arch }}"
+          git push origin HEAD:main
