@@ -9,6 +9,11 @@ on:
 permissions:
   contents: write
 
+# Nie pozwalaj na równoległe przebudowywanie tego samego feeda.
+concurrency:
+  group: apcontroller-apk-feed
+  cancel-in-progress: false
+
 env:
   OPENWRT_VERSION: "25.12.4"
   TARGET: "mediatek"
@@ -20,161 +25,295 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      # ------------------------------------------------------------
-      # Klucz APK
+      # ============================================================
+      # APK SIGNING KEY
       #
-      # Jeżeli publiczny nie istnieje -> generujemy parę.
-      # Jeżeli publiczny istnieje -> używamy istniejącej pary.
-      # Jeżeli publiczny istnieje, ale prywatnego brakuje -> błąd.
-      # ------------------------------------------------------------
+      # Jeżeli publiczny klucz nie istnieje:
+      #   -> generujemy nową parę secp256r1
+      #
+      # Jeżeli publiczny istnieje:
+      #   -> używamy istniejącej pary
+      #
+      # Jeżeli publiczny istnieje, ale prywatnego nie ma:
+      #   -> błąd
+      # ============================================================
       - name: Prepare APK signing key
         run: |
+          set -e
+
           mkdir -p keys
 
-          if [ ! -f keys/apcontroller.rsa.pub ]; then
-            echo "Public key does not exist - generating new key pair"
+          if [ ! -s keys/apcontroller.rsa.pub ]; then
+            echo "Public key does not exist."
+            echo "Generating new secp256r1 APK signing key..."
 
-            openssl genrsa \
-              -out keys/apcontroller.rsa \
-              2048
+            openssl ecparam \
+              -name prime256v1 \
+              -genkey \
+              -noout \
+              -out keys/apcontroller.rsa
 
-            openssl rsa \
+            openssl ec \
               -in keys/apcontroller.rsa \
               -pubout \
               -out keys/apcontroller.rsa.pub
 
             chmod 600 keys/apcontroller.rsa
 
-          else
-            echo "Public key already exists"
+            echo "New APK signing key generated."
 
-            if [ ! -f keys/apcontroller.rsa ]; then
-              echo "ERROR: public key exists but private key is missing"
+          else
+            echo "Public key already exists."
+
+            if [ ! -s keys/apcontroller.rsa ]; then
+              echo "ERROR: public key exists but private key is missing."
               exit 1
             fi
+
+            echo "Using existing APK signing key."
           fi
 
-          echo "Keys:"
-          ls -l keys/
+          echo
+          echo "APK keys:"
+          ls -lah keys/
 
-      # ------------------------------------------------------------
-      # SDK
-      # ------------------------------------------------------------
+      # ============================================================
+      # FETCH CURRENT MAIN
+      #
+      # Potrzebne do znalezienia ostatniego PKG_RELEASE.
+      # ============================================================
+      - name: Fetch current main
+        run: |
+          git fetch origin main
+
+      # ============================================================
+      # DOWNLOAD OPENWRT SDK
+      # ============================================================
       - name: Download OpenWrt SDK
         run: |
+          set -e
+
           wget -q \
             "https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/openwrt-sdk-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
 
+      # ============================================================
+      # EXTRACT SDK
+      # ============================================================
       - name: Extract SDK
         run: |
+          set -e
+
           tar --zstd -xf openwrt-sdk-*.tar.zst
 
-          SDK="$(find "$PWD" -maxdepth 1 -type d -name 'openwrt-sdk-*' | head -1)"
+          SDK="$(find "$PWD" \
+            -maxdepth 1 \
+            -type d \
+            -name 'openwrt-sdk-*' \
+            | head -1)"
+
+          if [ -z "$SDK" ]; then
+            echo "ERROR: OpenWrt SDK not found"
+            exit 1
+          fi
 
           echo "SDK=$SDK" >> "$GITHUB_ENV"
 
-      # ------------------------------------------------------------
-      # Pakiety
-      # ------------------------------------------------------------
+          echo "SDK: $SDK"
+
+      # ============================================================
+      # COPY PACKAGES
+      # ============================================================
       - name: Copy packages
         run: |
+          set -e
+
           mkdir -p "$SDK/package/apcontroller"
           mkdir -p "$SDK/package/luci-app-apcontroller"
 
-          cp -a apcontroller/. \
+          cp -a \
+            apcontroller/. \
             "$SDK/package/apcontroller/"
 
-          cp -a luci-app-apcontroller/. \
+          cp -a \
+            luci-app-apcontroller/. \
             "$SDK/package/luci-app-apcontroller/"
 
-      # ------------------------------------------------------------
-      # Revision
+      # ============================================================
+      # DETERMINE NEXT PACKAGE REVISION
       #
-      # Bierzemy obecne PKG_RELEASE z Makefile i zwiększamy o 1.
+      # Szukamy najwyższego:
       #
-      # Np.
-      #   r1 -> r2
-      #   r2 -> r3
+      #   apcontroller-*-rX.apk
+      #   luci-app-apcontroller-*-rX.apk
       #
-      # Dzięki temu apk upgrade zobaczy nową wersję.
-      # ------------------------------------------------------------
-      - name: Increase package revision
+      # w aktualnym origin/main.
+      #
+      # Jeżeli jest r4 -> budujemy r5.
+      # ============================================================
+      - name: Determine package revision
         run: |
-          for PKG in apcontroller luci-app-apcontroller; do
-            MAKEFILE="$SDK/package/$PKG/Makefile"
+          set -e
 
-            echo "Processing $MAKEFILE"
+          get_latest_revision() {
+            local PACKAGE="$1"
+            local MAX=0
+            local FILE
+            local BASE
+            local REV
 
-            CURRENT=$(sed -n 's/^[[:space:]]*PKG_RELEASE:=//p' "$MAKEFILE" | head -1)
+            for FILE in \
+              $(git ls-tree -r --name-only origin/main -- \
+                "feed/${ARCH}/${PACKAGE}-*.apk" 2>/dev/null); do
 
-            if [ -z "$CURRENT" ]; then
-              CURRENT=1
-            fi
+              BASE="$(basename "$FILE")"
 
-            NEW=$((CURRENT + 1))
+              REV="$(echo "$BASE" | sed -n \
+                's/.*-r\([0-9][0-9]*\)\.apk$/\1/p')"
 
+              if [ -n "$REV" ] && [ "$REV" -gt "$MAX" ]; then
+                MAX="$REV"
+              fi
+            done
+
+            echo "$MAX"
+          }
+
+          AP_REV="$(get_latest_revision apcontroller)"
+          LUCI_REV="$(get_latest_revision luci-app-apcontroller)"
+
+          echo "Current apcontroller revision: r${AP_REV}"
+          echo "Current luci-app-apcontroller revision: r${LUCI_REV}"
+
+          AP_NEW=$((AP_REV + 1))
+          LUCI_NEW=$((LUCI_REV + 1))
+
+          echo "New apcontroller revision: r${AP_NEW}"
+          echo "New luci-app-apcontroller revision: r${LUCI_NEW}"
+
+          AP_MAKEFILE="$SDK/package/apcontroller/Makefile"
+          LUCI_MAKEFILE="$SDK/package/luci-app-apcontroller/Makefile"
+
+          if grep -q '^[[:space:]]*PKG_RELEASE:=' "$AP_MAKEFILE"; then
             sed -i \
-              "s/^[[:space:]]*PKG_RELEASE:=.*/PKG_RELEASE:=$NEW/" \
-              "$MAKEFILE"
+              "s/^[[:space:]]*PKG_RELEASE:=.*/PKG_RELEASE:=${AP_NEW}/" \
+              "$AP_MAKEFILE"
+          else
+            sed -i \
+              "/^[[:space:]]*PKG_VERSION:=/a PKG_RELEASE:=${AP_NEW}" \
+              "$AP_MAKEFILE"
+          fi
 
-            echo "$PKG: r$CURRENT -> r$NEW"
+          if grep -q '^[[:space:]]*PKG_RELEASE:=' "$LUCI_MAKEFILE"; then
+            sed -i \
+              "s/^[[:space:]]*PKG_RELEASE:=.*/PKG_RELEASE:=${LUCI_NEW}/" \
+              "$LUCI_MAKEFILE"
+          else
+            sed -i \
+              "/^[[:space:]]*PKG_VERSION:=/a PKG_RELEASE:=${LUCI_NEW}" \
+              "$LUCI_MAKEFILE"
+          fi
 
-            grep -E 'PKG_VERSION|PKG_RELEASE' "$MAKEFILE" | head
-          done
+          echo
+          echo "apcontroller:"
+          grep -E 'PKG_VERSION|PKG_RELEASE' "$AP_MAKEFILE" || true
 
-      # ------------------------------------------------------------
-      # Feeds potrzebne przez pakiety
-      # ------------------------------------------------------------
+          echo
+          echo "luci-app-apcontroller:"
+          grep -E 'PKG_VERSION|PKG_RELEASE' "$LUCI_MAKEFILE" || true
+
+      # ============================================================
+      # UPDATE FEEDS
+      # ============================================================
       - name: Update feeds
         working-directory: ${{ env.SDK }}
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # ------------------------------------------------------------
-      # Konfiguracja SDK
-      # ------------------------------------------------------------
+      # ============================================================
+      # CONFIGURE SDK
+      # ============================================================
       - name: Configure
         working-directory: ${{ env.SDK }}
         run: |
           make defconfig
 
-      # ------------------------------------------------------------
-      # Build tylko naszych pakietów
-      # ------------------------------------------------------------
+      # ============================================================
+      # BUILD APController
+      # ============================================================
       - name: Build apcontroller
         working-directory: ${{ env.SDK }}
         run: |
           make package/apcontroller/compile V=s
 
+      # ============================================================
+      # BUILD LUCI APP
+      # ============================================================
       - name: Build luci-app-apcontroller
         working-directory: ${{ env.SDK }}
         run: |
           make package/luci-app-apcontroller/compile V=s
 
-      # ------------------------------------------------------------
-      # APK
+      # ============================================================
+      # BUILD HOST APK-TOOLS
       #
-      # SDK nie musi mieć apk w staging_dir/host/bin.
-      # Budujemy apk-tools host z SDK.
-      # ------------------------------------------------------------
+      # SDK może nie mieć apk w staging_dir/host/bin.
+      # ============================================================
       - name: Build host apk-tools
         working-directory: ${{ env.SDK }}
         run: |
           make package/apk/host/compile V=s
 
+      # ============================================================
+      # FIND APK TOOL
+      # ============================================================
+      - name: Find apk
+        run: |
+          set -e
+
+          APK="$(find "$SDK" \
+            -type f \
+            -name apk \
+            -path '*/staging_dir/host/*' \
+            -perm -111 \
+            | head -1)"
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: apk tool was not found."
+
+            echo
+            echo "Searching entire SDK:"
+            find "$SDK" -type f -name apk -print || true
+
+            exit 1
+          fi
+
+          echo "APK=$APK" >> "$GITHUB_ENV"
+
+          echo "Using APK:"
+          echo "$APK"
+
+      # ============================================================
+      # COLLECT ONLY OUR APKs
+      #
+      # Stare APK są usuwane.
+      # Feed zawiera tylko aktualny build.
+      # ============================================================
       - name: Collect APKs
         run: |
-          mkdir -p "feed/${ARCH}"
+          set -e
 
-          # Nie zostawiaj starych wersji APK.
-          rm -f "feed/${ARCH}"/*.apk
-          rm -f "feed/${ARCH}/packages.adb"
+          rm -rf "feed/${ARCH}"
+          mkdir -p "feed/${ARCH}"
 
           find "$SDK/bin/packages" \
             -type f \
@@ -186,38 +325,29 @@ jobs:
             \) \
             -exec cp -f {} "feed/${ARCH}/" \;
 
-          echo "Collected packages:"
+          echo
+          echo "Collected APKs:"
           ls -lah "feed/${ARCH}"
 
-      # ------------------------------------------------------------
-      # Znajdź apk z SDK
-      # ------------------------------------------------------------
-      - name: Find apk
-        run: |
-          APK="$(find "$SDK" \
-            -type f \
-            -name apk \
-            -path '*/staging_dir/host/*' \
-            -perm -111 \
-            | head -1)"
+          COUNT="$(find "feed/${ARCH}" -maxdepth 1 -name '*.apk' | wc -l)"
 
-          if [ -z "$APK" ]; then
-            echo "ERROR: apk tool was not built"
-            find "$SDK" -type f -name apk -print
+          if [ "$COUNT" -lt 2 ]; then
+            echo "ERROR: Expected at least 2 APKs, found $COUNT"
             exit 1
           fi
 
-          echo "APK=$APK" >> "$GITHUB_ENV"
-          echo "Using APK: $APK"
-
-      # ------------------------------------------------------------
-      # Index + podpis
-      # ------------------------------------------------------------
+      # ============================================================
+      # GENERATE APK REPOSITORY INDEX
+      # ============================================================
       - name: Generate APK repository index
         run: |
+          set -e
+
           cd "feed/${ARCH}"
 
           rm -f packages.adb
+
+          echo "Generating packages.adb..."
 
           "$APK" mkndx \
             --root . \
@@ -228,45 +358,117 @@ jobs:
             *.apk
 
           echo
-          echo "Feed:"
+          echo "Generated feed:"
           ls -lah
 
-      # ------------------------------------------------------------
-      # Commit
-      # ------------------------------------------------------------
-      - name: Commit feed and keys
+      # ============================================================
+      # SAVE FRESH FEED
+      #
+      # Musimy zachować go poza repo, ponieważ za chwilę
+      # resetujemy checkout do aktualnego origin/main.
+      # ============================================================
+      - name: Save generated feed
         run: |
+          set -e
+
+          rm -rf "$RUNNER_TEMP/apcontroller-feed"
+          mkdir -p "$RUNNER_TEMP/apcontroller-feed"
+
+          cp -a \
+            "feed/${ARCH}/." \
+            "$RUNNER_TEMP/apcontroller-feed/"
+
+          echo "Saved generated feed:"
+          ls -lah "$RUNNER_TEMP/apcontroller-feed"
+
+      # ============================================================
+      # COMMIT + PUSH
+      #
+      # NIE MA REBASE.
+      #
+      # 1. Pobieramy najnowszy main.
+      # 2. Resetujemy checkout do origin/main.
+      # 3. Wstawiamy świeżo wygenerowany feed.
+      # 4. Wstawiamy klucze.
+      # 5. Commit.
+      # 6. Push.
+      #
+      # Dzięki temu packages.adb nigdy nie jest scalany jako binary.
+      # ============================================================
+      - name: Commit and push feed
+        run: |
+          set -e
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add \
-            feed/${ARCH} \
-            keys/apcontroller.rsa \
-            keys/apcontroller.rsa.pub
+          for ATTEMPT in 1 2 3 4 5; do
+            echo
+            echo "============================================================"
+            echo "Push attempt ${ATTEMPT}/5"
+            echo "============================================================"
 
-          if git diff --cached --quiet; then
-            echo "No changes"
-            exit 0
-          fi
+            git fetch origin main
 
-          git commit -m "Build OpenWrt ${OPENWRT_VERSION} APK feed"
+            #
+            # Aktualny stan zdalnego main.
+            #
+            git reset --hard origin/main
 
-      # ------------------------------------------------------------
-      # Push
-      #
-      # Nie robimy rebase na binarnym packages.adb.
-      #
-      # Pobieramy aktualny main i odtwarzamy nasz commit na jego
-      # aktualnym stanie, a packages.adb generujemy ponownie.
-      # ------------------------------------------------------------
-      - name: Push feed
-        run: |
-          git fetch origin main
+            #
+            # Wstawiamy świeży feed z tego builda.
+            #
+            rm -rf "feed/${ARCH}"
+            mkdir -p "feed/${ARCH}"
 
-          git rebase origin/main || {
-            echo "Rebase conflict detected"
-            git rebase --abort
-            exit 1
-          }
+            cp -a \
+              "$RUNNER_TEMP/apcontroller-feed/." \
+              "feed/${ARCH}/"
 
-          git push origin HEAD:main
+            #
+            # Klucze z tego builda.
+            #
+            mkdir -p keys
+
+            if [ -f keys/apcontroller.rsa ] && \
+               [ -f keys/apcontroller.rsa.pub ]; then
+              echo "Signing keys present."
+            else
+              echo "ERROR: signing keys disappeared after reset"
+              exit 1
+            fi
+
+            git add \
+              "feed/${ARCH}" \
+              keys/apcontroller.rsa \
+              keys/apcontroller.rsa.pub
+
+            if git diff --cached --quiet; then
+              echo "No changes to commit."
+              exit 0
+            fi
+
+            git commit \
+              -m "Build OpenWrt ${OPENWRT_VERSION} APK feed"
+
+            #
+            # Normalny push.
+            #
+            if git push origin HEAD:main; then
+              echo
+              echo "Feed pushed successfully."
+              exit 0
+            fi
+
+            echo
+            echo "Push failed because origin/main changed."
+            echo "Fetching latest main and retrying..."
+
+            git reset --hard origin/main
+
+            sleep 2
+          done
+
+          echo
+          echo "ERROR: Could not push feed after 5 attempts."
+          exit 1
