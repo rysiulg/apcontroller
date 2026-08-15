@@ -27,7 +27,6 @@ jobs:
         run: |
           wget -q \
             https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/openwrt-sdk-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}_x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-
       - name: Extract SDK
         run: |
           tar --zstd -xf openwrt-sdk-*.tar.zst
