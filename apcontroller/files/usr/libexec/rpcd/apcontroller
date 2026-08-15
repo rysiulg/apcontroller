@@ -1,192 +1,354 @@
 #!/bin/sh
 
 #
-# (c) 2025 Cezary Jackiewicz <cezary@eko.one.pl>
+# (c) 2025-2026 Cezary Jackiewicz <cezary@eko.one.pl>
 #
 
+SSHOPTIONS="-o StrictHostKeyChecking=accept-new"
+
 BASEPATH="/tmp/apcontroller"
-T=$(uci -q get apcontroller.@global[0].path)
-[ -n "$T" ] && BASEPATH="$T"
-mkdir -p "$BASEPATH"
 
 . /lib/functions.sh
-. /usr/share/libubox/jshn.sh
 
-show_data_from_host() {
+T=$(uci -q get apcontroller.@global[0].path)
+[ -n "$T" ] && BASEPATH="$T"
+
+mkdir -p "$BASEPATH"
+
+
+#
+# Detect remote platform
+#
+detect_platform() {
+	local ipaddr="$1"
+	local port="$2"
+	local username="$3"
+	local password="$4"
+	local keyfile="$5"
+	local usekeyfile="$6"
+	local OUT
+
+	OUT=""
+
+	if [ "$usekeyfile" = "1" ] && [ -e "$keyfile" ]; then
+		OUT=$(ssh -q \
+			-i "$keyfile" \
+			$SSHOPTIONS \
+			-p "$port" \
+			-o ConnectTimeout=5 \
+			"$username@$ipaddr" '
+				if [ -f /etc/openwrt_release ] ||
+				   [ -f /etc/openwrt_version ] ||
+				   command -v ubus >/dev/null 2>&1; then
+					echo OPENWRT
+				elif command -v mca-cli >/dev/null 2>&1 ||
+				     command -v ubntbox >/dev/null 2>&1 ||
+				     [ -f /etc/ubnt_version ]; then
+					echo UBIQUITI
+				elif command -v cliclientd >/dev/null 2>&1 ||
+				     [ -d /etc/omada ] ||
+				     [ -d /etc/tplink ]; then
+					echo OMADA
+				else
+					echo UNKNOWN
+				fi
+			' 2>/dev/null)
+	else
+		OUT=$(sshpass -p "$password" ssh -q \
+			$SSHOPTIONS \
+			-p "$port" \
+			-o ConnectTimeout=5 \
+			"$username@$ipaddr" '
+				if [ -f /etc/openwrt_release ] ||
+				   [ -f /etc/openwrt_version ] ||
+				   command -v ubus >/dev/null 2>&1; then
+					echo OPENWRT
+				elif command -v mca-cli >/dev/null 2>&1 ||
+				     command -v ubntbox >/dev/null 2>&1 ||
+				     [ -f /etc/ubnt_version ]; then
+					echo UBIQUITI
+				elif command -v cliclientd >/dev/null 2>&1 ||
+				     [ -d /etc/omada ] ||
+				     [ -d /etc/tplink ]; then
+					echo OMADA
+				else
+					echo UNKNOWN
+				fi
+			' 2>/dev/null)
+	fi
+
+	case "$OUT" in
+		*OPENWRT*)
+			echo "openwrt"
+			;;
+		*UBIQUITI*)
+			echo "ubiquiti"
+			;;
+		*OMADA*)
+			echo "omada"
+			;;
+		*)
+			echo "unknown"
+			;;
+	esac
+}
+
+
+#
+# SSH options depending on remote platform
+#
+get_ssh_options() {
+	local platform="$1"
+
+	case "$platform" in
+		ubiquiti)
+			#
+			# Older Ubiquiti firmware can require legacy
+			# RSA/KEX algorithms.
+			#
+			echo "$SSHOPTIONS \
+				-o HostKeyAlgorithms=+ssh-rsa \
+				-o PubkeyAcceptedAlgorithms=+ssh-rsa \
+				-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1"
+			;;
+
+		*)
+			echo "$SSHOPTIONS"
+			;;
+	esac
+}
+
+
+#
+# Run command remotely
+#
+remote_ssh() {
+	local platform="$1"
+	local ipaddr="$2"
+	local port="$3"
+	local username="$4"
+	local password="$5"
+	local keyfile="$6"
+	local usekeyfile="$7"
+	shift 7
+
+	local OPTIONS
+	OPTIONS=$(get_ssh_options "$platform")
+
+	if [ "$usekeyfile" = "1" ] && [ -e "$keyfile" ]; then
+		ssh -q \
+			-i "$keyfile" \
+			$OPTIONS \
+			-p "$port" \
+			"$username@$ipaddr" "$@" 2>/dev/null
+	else
+		sshpass -p "$password" \
+			ssh -q \
+			$OPTIONS \
+			-p "$port" \
+			"$username@$ipaddr" "$@" 2>/dev/null
+	fi
+}
+
+
+#
+# Copy file to remote host
+#
+remote_scp() {
+	local platform="$1"
+	local ipaddr="$2"
+	local port="$3"
+	local username="$4"
+	local password="$5"
+	local keyfile="$6"
+	local usekeyfile="$7"
+	local source="$8"
+	local destination="$9"
+
+	local OPTIONS
+	OPTIONS=$(get_ssh_options "$platform")
+
+	#
+	# -O is IMPORTANT:
+	# force legacy SCP protocol instead of SFTP.
+	#
+	if [ "$usekeyfile" = "1" ] && [ -e "$keyfile" ]; then
+		scp -O \
+			-i "$keyfile" \
+			$OPTIONS \
+			-P "$port" \
+			"$source" \
+			"$username@$ipaddr:$destination" \
+			2>/dev/null
+	else
+		sshpass -p "$password" \
+			scp -O \
+			$OPTIONS \
+			-P "$port" \
+			"$source" \
+			"$username@$ipaddr:$destination" \
+			2>/dev/null
+	fi
+}
+
+
+#
+# Get data from host
+#
+get_data_from_host() {
 	local cfg="$1"
-	local oldns
-	local hostname model load uptime mac software ssid
+
+	local enabled
+	local ipaddr
+	local username
+	local password
+	local port
+	local usekeyfile
+	local keyfile
+	local platform
 
 	config_get_bool enabled "$cfg" enabled 1
-	config_get name "$cfg" name
+	[ "$enabled" -gt 0 ] || return 0
+
 	config_get ipaddr "$cfg" ipaddr
-	config_get port "$cfg" port 22
 	config_get username "$cfg" username
+
+	[ -z "$ipaddr" ] || [ -z "$username" ] && return 0
+
 	config_get password "$cfg" password
+	config_get port "$cfg" port 22
 
-	json_add_object
-	json_add_string "section" "$cfg"
-	json_add_boolean "enabled" "$enabled"
-	json_add_string "name" "$name"
-	json_add_string "ipaddr" "$ipaddr"
-	json_add_int "port" "$port"
-	json_add_string "username" "$username"
-	json_add_string "password" "$password"
+	config_get usekeyfile "$cfg" usekeyfile 0
+	config_get keyfile "$cfg" keyfile "/root/.ssh/id_dropbear"
 
-	LASTCONTACT=-1
-	if [ -s "${BASEPATH}/${ipaddr}-${cfg}" ] && [ "$enabled" = "1" ]; then
-		FILEMODTIME=$(date +%s -r $BASEPATH/${ipaddr}-${cfg})
-		NOW=$(date +%s)
-		LASTCONTACT=$((NOW - FILEMODTIME))
 
-		json_set_namespace host oldns
-		json_init
-		json_load_file "${BASEPATH}/${ipaddr}-${cfg}"
-		json_get_vars hostname model load uptime mac software ssid channels2g channels5g channels6g
+	#
+	# Detect platform.
+	#
+	platform=$(detect_platform \
+		"$ipaddr" \
+		"$port" \
+		"$username" \
+		"$password" \
+		"$keyfile" \
+		"$usekeyfile")
 
-		for BAND in 2g 5g 6g; do
-			if json_is_a "clientslist${BAND}" array; then
-				json_set_namespace $oldns
-				json_add_array "clientslist${BAND}"
-				json_set_namespace host oldns
+	#
+	# Unknown platform is not fatal.
+	# Use generic agent.
+	#
+	[ -z "$platform" ] && platform="unknown"
 
-				json_select "clientslist${BAND}"
 
-				idx=1
-				while json_is_a $idx object; do
-					json_select $idx
-					json_get_var _ssid "ssid"
-					json_get_var _mac "mac"
-					json_get_var _rx "rx"
-					json_get_var _tx "tx"
-					json_get_var _signal "signal"
-					json_get_var _connected "connected"
-					json_get_var _wifi "wifi"
-					json_get_var _ipaddr "ipaddr"
-					json_get_var _name "name"
+	#
+	# Agent selection.
+	#
+	AGENT="/usr/share/apcontroller/apcontroller-agent"
 
-					json_set_namespace $oldns
-					json_add_object
-					json_add_string "ssid" "$_ssid"
-					json_add_string "mac" "$_mac"
-					json_add_int "rx" "$_rx"
-					json_add_int "tx" "$_tx"
-					json_add_int "signal" "$_signal"
-					json_add_int "connected" "$_connected"
-					json_add_int "wifi" "$_wifi"
-					json_add_string "ipaddr" "$_ipaddr"
-					json_add_string "name" "$_name"
-					json_close_object
-					json_set_namespace host oldns
+	#
+	# If platform-specific agents exist, use them.
+	#
+	case "$platform" in
+		openwrt)
+			[ -x "/usr/share/apcontroller/apcontroller-agent-openwrt" ] &&
+				AGENT="/usr/share/apcontroller/apcontroller-agent-openwrt"
+			;;
 
-					json_select ..
-					idx=$(( idx + 1 ))
-				done
+		ubiquiti)
+			[ -x "/usr/share/apcontroller/apcontroller-agent-ubiquiti" ] &&
+				AGENT="/usr/share/apcontroller/apcontroller-agent-ubiquiti"
+			;;
 
-				json_set_namespace $oldns
-				json_close_array
-				json_set_namespace host oldns
+		omada)
+			[ -x "/usr/share/apcontroller/apcontroller-agent-omada" ] &&
+				AGENT="/usr/share/apcontroller/apcontroller-agent-omada"
+			;;
+	esac
 
-				json_select ..
-			fi
-		done
 
-		json_cleanup
-		json_set_namespace $oldns
+	#
+	# Copy agent.
+	#
+	if remote_scp \
+		"$platform" \
+		"$ipaddr" \
+		"$port" \
+		"$username" \
+		"$password" \
+		"$keyfile" \
+		"$usekeyfile" \
+		"$AGENT" \
+		"/tmp"; then
 
-		json_add_string "hostname" "$hostname"
-		json_add_string "model" "$model"
-		json_add_string "load" "$load"
-		json_add_int "uptime" "$uptime"
-		json_add_string "mac" "$mac"
-		json_add_string "software" "$software"
-		[ -n "$channels2g" ] && json_add_string "channels2g" "$channels2g"
-		[ -n "$channels5g" ] && json_add_string "channels5g" "$channels5g"
-		[ -n "$channels6g" ] && json_add_string "channels6g" "$channels6g"
+		#
+		# Execute agent.
+		#
+		remote_ssh \
+			"$platform" \
+			"$ipaddr" \
+			"$port" \
+			"$username" \
+			"$password" \
+			"$keyfile" \
+			"$usekeyfile" \
+			"/tmp/$(basename "$AGENT")" \
+			> "${BASEPATH}/${ipaddr}-${cfg}"
+
+		T=$?
+
+		#
+		# Remove agent.
+		#
+		remote_ssh \
+			"$platform" \
+			"$ipaddr" \
+			"$port" \
+			"$username" \
+			"$password" \
+			"$keyfile" \
+			"$usekeyfile" \
+			"rm -f /tmp/$(basename "$AGENT")" \
+			>/dev/null 2>&1
+	else
+		T=1
 	fi
-	json_add_int "lastcontact" "$LASTCONTACT"
 
-	json_close_object
-}
 
-show_activity() {
-	read input
-	json_load "$input"
-	json_get_var section section
+	#
+	# Check result.
+	#
+	NOW=$(date "+%s")
+	VAL=0
 
-	json_init
+	if [ "$T" -eq 0 ] &&
+	   [ -s "${BASEPATH}/${ipaddr}-${cfg}" ]; then
 
-	ipaddr=$(uci_get "apcontroller" "$section" "ipaddr" "")
-	enabled=$(uci_get "apcontroller" "$section" "enabled" "0")
-	json_add_array "activity"
-	if [ -n "$ipaddr" ] && [ -s "${BASEPATH}/${ipaddr}.txt" ] && [ "$enabled" = "1" ]; then
-		while read -r LINE; do
-			set -- $LINE
-			json_add_object
-			json_add_int "timestamp" $1
-			json_add_int "value" $2
-			json_close_object
-		done < <(tail -n 672 "${BASEPATH}/${ipaddr}.txt")
+		TIMESTAMP=$(date +%s -r "${BASEPATH}/${ipaddr}-${cfg}")
+		D=$((NOW - TIMESTAMP))
+
+		[ "$D" -le 60 ] && VAL=1
 	fi
-	json_close_array
-	json_dump
+
+
+	#
+	# Log only day/hour.
+	#
+	NOW=$(date +%s -d "$(date -d @"$NOW" "+%Y-%m-%d %H:00")")
+
+	touch "${BASEPATH}/${ipaddr}.txt"
+
+	grep -q "$NOW $VAL" "${BASEPATH}/${ipaddr}.txt" ||
+		echo "$NOW $VAL" >> "${BASEPATH}/${ipaddr}.txt"
+
+
+	#
+	# Save detected platform for LuCI/debugging.
+	#
+	echo "$platform" > "${BASEPATH}/${ipaddr}-${cfg}.platform"
 }
 
-show_scripts() {
-	json_init
-	json_add_array "scripts"
-	for FILE in $(find /usr/share/apcontroller/scripts -type f); do
-		DESC=$(awk '/^#desc:/{gsub("#desc:", "");print $0}' "$FILE" | head -n1)
-		grep -q "^#warn" "$FILE" && WARN=1 || WARN=0
-		T=$(basename "$FILE")
-		json_add_object
-		json_add_string "file" "$T"
-		json_add_string "description" "${DESC:-$T}"
-		json_add_int "warn" $WARN
-		json_close_object
-	done
-	json_close_array
-	json_dump
-}
 
-show_status() {
-	config_load apcontroller
-	json_init
-	json_add_array "hosts"
-	config_foreach show_data_from_host host
-	json_close_array
-	json_dump
-}
-
-case "$1" in
-	list)
-		json_init
-
-		json_add_object "activity"
-		json_add_string "section" ""
-		json_close_object
-
-		json_add_object "scripts"
-		json_close_object
-
-		json_add_object "status"
-		json_close_object
-
-		json_dump
-		;;
-	call)
-		case "$2" in
-			activity)
-				show_activity
-				;;
-			scripts)
-				show_scripts
-				;;
-			status)
-				show_status
-				;;
-		esac
-		;;
-esac
+config_load apcontroller
+config_foreach get_data_from_host host
 
 exit 0
