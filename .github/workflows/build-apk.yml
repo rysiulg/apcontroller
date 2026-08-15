@@ -25,68 +25,78 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ------------------------------------------------------------
-      # APK signing key
-      # ------------------------------------------------------------
+      # ============================================================
+      # KEY
+      # Generujemy tylko jeśli BRAKUJE PUBLICZNEGO klucza.
+      # ============================================================
 
-      - name: Prepare APK signing key
+      - name: Prepare signing key
         run: |
           mkdir -p keys
 
-          if [ -f keys/apcontroller.rsa ] && [ -f keys/apcontroller.rsa.pub ]; then
-            echo "Signing key already exists"
+          if [ -f keys/apcontroller.rsa.pub ]; then
+            echo "Public key exists - keeping existing key"
           else
-            echo "Signing key does not exist - generating it"
+            echo "Public key missing - generating new RSA key pair"
 
-            wget -q \
-              https://github.com/openwrt/apk-tools/releases/latest/download/apk-tools-static-x86_64.tar.gz \
-              -O /tmp/apk-tools.tar.gz
+            docker run --rm \
+              -v "$PWD/keys:/keys" \
+              alpine:latest \
+              sh -c '
+                apk add --no-cache abuild
 
-            mkdir -p /tmp/apk-tools
-            tar -xzf /tmp/apk-tools.tar.gz -C /tmp/apk-tools
+                mkdir -p /tmp/abuild/.abuild
+                export HOME=/tmp/abuild
 
-            APK=$(find /tmp/apk-tools -type f -name apk | head -1)
+                abuild-keygen -n -q
 
-            "$APK" keygen \
-              --algorithm rsa \
-              --name apcontroller \
-              --output keys/apcontroller.rsa
+                cp /tmp/abuild/.abuild/*.rsa /keys/apcontroller.rsa
+                cp /tmp/abuild/.abuild/*.rsa.pub /keys/apcontroller.rsa.pub
+              '
 
+            chmod 600 keys/apcontroller.rsa
+
+            echo "Generated:"
             ls -lah keys
           fi
 
-      # ------------------------------------------------------------
-      # Check whether packages already exist
-      # ------------------------------------------------------------
+      # ============================================================
+      # CHECK APK
+      # ============================================================
 
       - name: Check existing APKs
         id: check
         run: |
           mkdir -p feed/${ARCH}
 
-          AP=$(find feed/${ARCH} -maxdepth 1 \
+          AP=$(find feed/${ARCH} \
+            -maxdepth 1 \
             -type f \
             -name 'apcontroller-*.apk' \
             | head -1)
 
-          LUCI=$(find feed/${ARCH} -maxdepth 1 \
+          LUCI=$(find feed/${ARCH} \
+            -maxdepth 1 \
             -type f \
             -name 'luci-app-apcontroller-*.apk' \
             | head -1)
 
           if [ -n "$AP" ] && [ -n "$LUCI" ]; then
-            echo "Both APKs already exist:"
+            echo "Existing packages found:"
             echo "  $AP"
             echo "  $LUCI"
+
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
-            echo "APK missing - build required"
+            echo "Packages missing - SDK build required"
+
             echo "build=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # ------------------------------------------------------------
-      # SDK is downloaded ONLY when package must be built
-      # ------------------------------------------------------------
+      # ============================================================
+      # SDK
+      # Pobieramy TYLKO gdy trzeba budować APK.
+      # ============================================================
 
       - name: Download OpenWrt SDK
         if: steps.check.outputs.build == 'true'
@@ -105,9 +115,9 @@ jobs:
             -name 'openwrt-sdk-*' \
             | head -1)" >> "$GITHUB_ENV"
 
-      # ------------------------------------------------------------
-      # Build packages
-      # ------------------------------------------------------------
+      # ============================================================
+      # BUILD
+      # ============================================================
 
       - name: Copy packages
         if: steps.check.outputs.build == 'true'
@@ -146,9 +156,9 @@ jobs:
         run: |
           make package/luci-app-apcontroller/compile V=s
 
-      # ------------------------------------------------------------
-      # Collect APKs
-      # ------------------------------------------------------------
+      # ============================================================
+      # COLLECT
+      # ============================================================
 
       - name: Collect APKs
         if: steps.check.outputs.build == 'true'
@@ -167,57 +177,49 @@ jobs:
 
           ls -lah feed/${ARCH}
 
-      # ------------------------------------------------------------
-      # Generate repository index
-      # ------------------------------------------------------------
+      # ============================================================
+      # INDEX
+      #
+      # Alpine dostarcza apk-tools.
+      # Nie potrzebujemy SDK tylko po to, żeby zrobić packages.adb.
+      # ============================================================
 
       - name: Generate APK repository index
         run: |
-          mkdir -p feed/${ARCH}
+          docker run --rm \
+            -v "$PWD:/work" \
+            alpine:latest \
+            sh -c '
+              apk add --no-cache apk-tools
 
-          if [ -n "${SDK:-}" ]; then
-            APK=$(find "$SDK/staging_dir/host/bin" \
-              -name apk \
-              -type f \
-              | head -1)
-          fi
+              cd /work/feed/${ARCH}
 
-          if [ -z "${APK:-}" ]; then
-            APK=$(find /usr/bin /usr/local/bin /opt \
-              -type f \
-              -name apk \
-              2>/dev/null \
-              | head -1)
-          fi
+              apk mkndx \
+                --root . \
+                --keys-dir ../../keys \
+                --allow-untrusted \
+                --sign-key ../../keys/apcontroller.rsa \
+                --output packages.adb \
+                *.apk
 
-          if [ -z "${APK:-}" ]; then
-            echo "ERROR: apk tool not found"
-            exit 1
-          fi
+              ls -lah
+            '
+        env:
+          ARCH: ${{ env.ARCH }}
 
-          echo "Using APK: $APK"
-
-          cd feed/${ARCH}
-
-          "$APK" mkndx \
-            --root . \
-            --keys-dir ../../keys \
-            --sign ../../keys/apcontroller.rsa \
-            --output packages.adb \
-            *.apk
-
-          ls -lah
-
-      # ------------------------------------------------------------
-      # Publish
-      # ------------------------------------------------------------
+      # ============================================================
+      # PUBLISH
+      # ============================================================
 
       - name: Commit and push feed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add feed/${ARCH} keys
+          git add feed/${ARCH} keys/apcontroller.rsa.pub
+
+          # PRYWATNEGO KLUCZA NIE COMMITUJEMY
+          git reset keys/apcontroller.rsa 2>/dev/null || true
 
           if git diff --cached --quiet; then
             echo "No feed changes"
