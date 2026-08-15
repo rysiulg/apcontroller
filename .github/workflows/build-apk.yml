@@ -105,4 +105,8 @@ jobs:
           fi
 
           git commit -m "Build OpenWrt ${OPENWRT_VERSION} APK feed"
-          git push
+
+          git fetch origin main
+          git rebase origin/main
+
+          git push origin HEAD:main
