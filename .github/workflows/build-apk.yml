@@ -172,6 +172,10 @@ jobs:
         run: |
           mkdir -p "feed/${ARCH}"
 
+          # Nie zostawiaj starych wersji APK.
+          rm -f "feed/${ARCH}"/*.apk
+          rm -f "feed/${ARCH}/packages.adb"
+
           find "$SDK/bin/packages" \
             -type f \
             -name '*.apk' \
@@ -218,6 +222,7 @@ jobs:
           "$APK" mkndx \
             --root . \
             --keys-dir ../../keys \
+            --allow-untrusted \
             --sign ../../keys/apcontroller.rsa \
             --output packages.adb \
             *.apk
