@@ -5,21 +5,206 @@
 #
 
 SSHOPTIONS="-o StrictHostKeyChecking=accept-new"
-SCPOPTIONS="-O"
 
 BASEPATH="/tmp/apcontroller"
 
 . /lib/functions.sh
 
+T=$(uci -q get apcontroller.@global[0].path)
+[ -n "$T" ] && BASEPATH="$T"
+
+mkdir -p "$BASEPATH"
+
+
+#
+# Detect remote platform
+#
+detect_platform() {
+	local ipaddr="$1"
+	local port="$2"
+	local username="$3"
+	local password="$4"
+	local keyfile="$5"
+	local usekeyfile="$6"
+	local OUT
+
+	OUT=""
+
+	if [ "$usekeyfile" = "1" ] && [ -e "$keyfile" ]; then
+		OUT=$(ssh -q \
+			-i "$keyfile" \
+			$SSHOPTIONS \
+			-p "$port" \
+			-o ConnectTimeout=5 \
+			"$username@$ipaddr" '
+				if [ -f /etc/openwrt_release ] ||
+				   [ -f /etc/openwrt_version ] ||
+				   command -v ubus >/dev/null 2>&1; then
+					echo OPENWRT
+				elif command -v mca-cli >/dev/null 2>&1 ||
+				     command -v ubntbox >/dev/null 2>&1 ||
+				     [ -f /etc/ubnt_version ]; then
+					echo UBIQUITI
+				elif command -v cliclientd >/dev/null 2>&1 ||
+				     [ -d /etc/omada ] ||
+				     [ -d /etc/tplink ]; then
+					echo OMADA
+				else
+					echo UNKNOWN
+				fi
+			' 2>/dev/null)
+	else
+		OUT=$(sshpass -p "$password" ssh -q \
+			$SSHOPTIONS \
+			-p "$port" \
+			-o ConnectTimeout=5 \
+			"$username@$ipaddr" '
+				if [ -f /etc/openwrt_release ] ||
+				   [ -f /etc/openwrt_version ] ||
+				   command -v ubus >/dev/null 2>&1; then
+					echo OPENWRT
+				elif command -v mca-cli >/dev/null 2>&1 ||
+				     command -v ubntbox >/dev/null 2>&1 ||
+				     [ -f /etc/ubnt_version ]; then
+					echo UBIQUITI
+				elif command -v cliclientd >/dev/null 2>&1 ||
+				     [ -d /etc/omada ] ||
+				     [ -d /etc/tplink ]; then
+					echo OMADA
+				else
+					echo UNKNOWN
+				fi
+			' 2>/dev/null)
+	fi
+
+	case "$OUT" in
+		*OPENWRT*)
+			echo "openwrt"
+			;;
+		*UBIQUITI*)
+			echo "ubiquiti"
+			;;
+		*OMADA*)
+			echo "omada"
+			;;
+		*)
+			echo "unknown"
+			;;
+	esac
+}
+
+
+#
+# SSH options depending on remote platform
+#
+get_ssh_options() {
+	local platform="$1"
+
+	case "$platform" in
+		ubiquiti)
+			echo "$SSHOPTIONS \
+				-o HostKeyAlgorithms=+ssh-rsa \
+				-o PubkeyAcceptedAlgorithms=+ssh-rsa \
+				-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1"
+			;;
+
+		*)
+			echo "$SSHOPTIONS"
+			;;
+	esac
+}
+
+
+#
+# Run command remotely
+#
+remote_ssh() {
+	local platform="$1"
+	local ipaddr="$2"
+	local port="$3"
+	local username="$4"
+	local password="$5"
+	local keyfile="$6"
+	local usekeyfile="$7"
+
+	shift 7
+
+	local OPTIONS
+	OPTIONS=$(get_ssh_options "$platform")
+
+	if [ "$usekeyfile" = "1" ] && [ -e "$keyfile" ]; then
+		ssh -q \
+			-i "$keyfile" \
+			$OPTIONS \
+			-p "$port" \
+			"$username@$ipaddr" "$@" 2>/dev/null
+	else
+		sshpass -p "$password" \
+			ssh -q \
+			$OPTIONS \
+			-p "$port" \
+			"$username@$ipaddr" "$@" 2>/dev/null
+	fi
+}
+
+
+#
+# Copy file to remote host
+#
+remote_scp() {
+	local platform="$1"
+	local ipaddr="$2"
+	local port="$3"
+	local username="$4"
+	local password="$5"
+	local keyfile="$6"
+	local usekeyfile="$7"
+	local source="$8"
+	local destination="$9"
+
+	local OPTIONS
+	OPTIONS=$(get_ssh_options "$platform")
+
+	if [ "$usekeyfile" = "1" ] && [ -e "$keyfile" ]; then
+		scp -O \
+			-i "$keyfile" \
+			$OPTIONS \
+			-P "$port" \
+			"$source" \
+			"$username@$ipaddr:$destination" \
+			2>/dev/null
+	else
+		sshpass -p "$password" \
+			scp -O \
+			$OPTIONS \
+			-P "$port" \
+			"$source" \
+			"$username@$ipaddr:$destination" \
+			2>/dev/null
+	fi
+}
+
+
+#
+# Get data from host
+#
 get_data_from_host() {
 	local cfg="$1"
-	local enabled ipaddr username password port
-	local usekeyfile keyfile
-	local sshoptions
-	local scpoptions
-	local target
-	local output
-	local timestamp now val d
+
+	local enabled
+	local ipaddr
+	local username
+	local password
+	local port
+	local usekeyfile
+	local keyfile
+	local platform
+	local AGENT
+	local T
+	local NOW
+	local VAL
+	local TIMESTAMP
+	local D
 
 	config_get_bool enabled "$cfg" enabled 1
 	[ "$enabled" -gt 0 ] || return 0
@@ -33,104 +218,122 @@ get_data_from_host() {
 	config_get password "$cfg" password
 	config_get port "$cfg" port 22
 
-	#
-	# Dodatkowe opcje SSH można ustawić per host.
-	#
-	# Przykład dla starego Ubiquiti:
-	# option sshoptions '-c aes128-ctr'
-	#
-	config_get sshoptions "$cfg" sshoptions ""
-
-	#
-	# SCP:
-	# OpenSSH >= 9 domyślnie używa SFTP.
-	# -O wymusza stary protokół SCP, potrzebny m.in.
-	# przy Dropbear na OpenWrt/Ubiquiti.
-	#
-	config_get scpoptions "$cfg" scpoptions "-O"
-
 	config_get usekeyfile "$cfg" usekeyfile 0
 	config_get keyfile "$cfg" keyfile "/root/.ssh/id_dropbear"
 
-	target="${username}@${ipaddr}"
-	output="${BASEPATH}/${ipaddr}-${cfg}"
 
-	if [ "$usekeyfile" -eq 1 ] && [ -e "$keyfile" ]; then
+	#
+	# Detect platform
+	#
+	platform=$(detect_platform \
+		"$ipaddr" \
+		"$port" \
+		"$username" \
+		"$password" \
+		"$keyfile" \
+		"$usekeyfile")
 
-		scp \
-			-i "$keyfile" \
-			${SSHOPTIONS} \
-			${scpoptions} \
-			-P "$port" \
-			/usr/share/apcontroller/apcontroller-agent \
-			"${target}:/tmp" \
-			2>/dev/null
+	[ -n "$platform" ] || platform="unknown"
 
-		if [ $? -eq 0 ]; then
-			ssh \
-				-q \
-				-i "$keyfile" \
-				${SSHOPTIONS} \
-				${sshoptions} \
-				-p "$port" \
-				"$target" \
-				"/tmp/apcontroller-agent" \
-				> "$output" 2>/dev/null
-		fi
 
+	#
+	# Select agent
+	#
+	AGENT="/usr/share/apcontroller/apcontroller-agent"
+
+	case "$platform" in
+		openwrt)
+			[ -x "/usr/share/apcontroller/apcontroller-agent-openwrt" ] &&
+				AGENT="/usr/share/apcontroller/apcontroller-agent-openwrt"
+			;;
+
+		ubiquiti)
+			[ -x "/usr/share/apcontroller/apcontroller-agent-ubiquiti" ] &&
+				AGENT="/usr/share/apcontroller/apcontroller-agent-ubiquiti"
+			;;
+
+		omada)
+			[ -x "/usr/share/apcontroller/apcontroller-agent-omada" ] &&
+				AGENT="/usr/share/apcontroller/apcontroller-agent-omada"
+			;;
+	esac
+
+
+	#
+	# Copy agent and execute it
+	#
+	if remote_scp \
+		"$platform" \
+		"$ipaddr" \
+		"$port" \
+		"$username" \
+		"$password" \
+		"$keyfile" \
+		"$usekeyfile" \
+		"$AGENT" \
+		"/tmp"; then
+
+		remote_ssh \
+			"$platform" \
+			"$ipaddr" \
+			"$port" \
+			"$username" \
+			"$password" \
+			"$keyfile" \
+			"$usekeyfile" \
+			"/tmp/$(basename "$AGENT")" \
+			> "${BASEPATH}/${ipaddr}-${cfg}"
+
+		T=$?
+
+		remote_ssh \
+			"$platform" \
+			"$ipaddr" \
+			"$port" \
+			"$username" \
+			"$password" \
+			"$keyfile" \
+			"$usekeyfile" \
+			"rm -f /tmp/$(basename "$AGENT")" \
+			>/dev/null 2>&1
 	else
-
-		sshpass -p "$password" \
-			scp \
-			${SSHOPTIONS} \
-			${scpoptions} \
-			-P "$port" \
-			/usr/share/apcontroller/apcontroller-agent \
-			"${target}:/tmp" \
-			2>/dev/null
-
-		if [ $? -eq 0 ]; then
-			sshpass -p "$password" \
-				ssh \
-				-q \
-				${SSHOPTIONS} \
-				${sshoptions} \
-				-p "$port" \
-				"$target" \
-				"/tmp/apcontroller-agent" \
-				> "$output" 2>/dev/null
-		fi
-
+		T=1
 	fi
 
-	#
-	# Sprawdzenie czy agent faktycznie zwrócił dane.
-	#
-	now=$(date "+%s")
-	val=0
 
-	if [ -s "$output" ]; then
-		timestamp=$(date +%s -r "$output")
-		d=$((now - timestamp))
+	#
+	# Determine online status
+	#
+	NOW=$(date "+%s")
+	VAL=0
 
-		[ "$d" -le 60 ] && val=1
+	if [ "$T" -eq 0 ] &&
+	   [ -s "${BASEPATH}/${ipaddr}-${cfg}" ]; then
+
+		TIMESTAMP=$(date +%s -r "${BASEPATH}/${ipaddr}-${cfg}")
+		D=$((NOW - TIMESTAMP))
+
+		[ "$D" -le 60 ] && VAL=1
 	fi
 
+
 	#
-	# Log tylko dzień/godzina.
+	# Log only day/hour
 	#
-	now=$(date +%s -d "$(date -d @"$now" "+%Y-%m-%d %H:00")")
+	NOW=$(date +%s -d "$(date -d @"$NOW" "+%Y-%m-%d %H:00")")
 
 	touch "${BASEPATH}/${ipaddr}.txt"
 
-	grep -q "$now $val" "${BASEPATH}/${ipaddr}.txt" ||
-		echo "$now $val" >> "${BASEPATH}/${ipaddr}.txt"
+	grep -q "$NOW $VAL" "${BASEPATH}/${ipaddr}.txt" ||
+		echo "$NOW $VAL" >> "${BASEPATH}/${ipaddr}.txt"
+
+
+	#
+	# Save detected platform
+	#
+	echo "$platform" > "${BASEPATH}/${ipaddr}-${cfg}.platform"
 }
 
-T=$(uci -q get apcontroller.@global[0].path)
-[ -n "$T" ] && BASEPATH="$T"
-
-mkdir -p "$BASEPATH"
 
 config_load apcontroller
 config_foreach get_data_from_host host
