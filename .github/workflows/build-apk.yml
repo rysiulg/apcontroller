@@ -23,10 +23,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Prepare APK signing key
+        run: |
+          mkdir -p keys
+
+          if [ -f keys/apcontroller.rsa ]; then
+            echo "Existing signing key found."
+          else
+            echo "No signing key found - generating one."
+
+            openssl ecparam \
+              -name prime256v1 \
+              -genkey \
+              -noout \
+              -out keys/apcontroller.rsa
+
+            chmod 600 keys/apcontroller.rsa
+
+            openssl ec \
+              -in keys/apcontroller.rsa \
+              -pubout \
+              -out keys/apcontroller.rsa.pub
+
+            echo "Signing key generated."
+          fi
+
+          test -s keys/apcontroller.rsa
+          test -s keys/apcontroller.rsa.pub
+
+          echo "Public key:"
+          cat keys/apcontroller.rsa.pub
+
       - name: Download OpenWrt SDK
         run: |
           wget -q \
             https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}/openwrt-sdk-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+
       - name: Extract SDK
         run: |
           tar --zstd -xf openwrt-sdk-*.tar.zst
@@ -81,23 +113,28 @@ jobs:
         run: |
           APK=$(find "$SDK/staging_dir/host/bin" -name apk -type f | head -1)
 
+          test -n "$APK"
+          test -x "$APK"
+
           cd feed/${ARCH}
 
           "$APK" mkndx \
-            --root . \
-            --keys-dir . \
             --allow-untrusted \
+            --sign-key "$GITHUB_WORKSPACE/keys/apcontroller.rsa" \
             --output packages.adb \
-            *.apk
+            ./*.apk
 
           ls -lah
 
-      - name: Commit feed
+      - name: Commit feed and signing key
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add feed/${ARCH}
+          git add \
+            feed/${ARCH} \
+            keys/apcontroller.rsa \
+            keys/apcontroller.rsa.pub
 
           if git diff --cached --quiet; then
             echo "No feed changes"
