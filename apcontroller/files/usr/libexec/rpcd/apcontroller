@@ -17,19 +17,10 @@ T=$(uci -q get apcontroller.@global[0].path)
 # Get host status/data
 #
 show_status() {
-	local cfg
-	local enabled
-	local ipaddr
-	local datafile
-	local platformfile
-	local lastcontact
-	local platform
-
 	json_init
 	json_add_array "hosts"
 
 	config_load apcontroller
-
 	config_foreach _show_status_host host
 
 	json_close_array
@@ -39,7 +30,6 @@ show_status() {
 
 _show_status_host() {
 	local cfg="$1"
-
 	local enabled
 	local name
 	local ipaddr
@@ -50,11 +40,10 @@ _show_status_host() {
 	local now
 	local timestamp
 	local data
-	local clientslist2g
-	local clientslist5g
-	local clientslist6g
 
 	config_get_bool enabled "$cfg" enabled 1
+	[ "$enabled" -gt 0 ] || return 0
+
 	config_get name "$cfg" name
 	config_get ipaddr "$cfg" ipaddr
 
@@ -67,16 +56,24 @@ _show_status_host() {
 	lastcontact=-1
 
 	if [ -s "$output" ]; then
-		timestamp=$(date +%s -r "$output")
-		lastcontact=$((now - timestamp))
+		timestamp=$(date +%s -r "$output" 2>/dev/null)
+
+		if [ -n "$timestamp" ]; then
+			lastcontact=$((now - timestamp))
+		fi
 	fi
 
 	platform="unknown"
 
 	if [ -f "$platformfile" ]; then
 		read -r platform < "$platformfile"
+		[ -n "$platform" ] || platform="unknown"
 	fi
 
+
+	#
+	# Start host object.
+	#
 	json_add_object
 
 	json_add_string "section" "$cfg"
@@ -85,47 +82,76 @@ _show_status_host() {
 	json_add_string "platform" "$platform"
 	json_add_int "lastcontact" "$lastcontact"
 
+
 	#
 	# Agent output is JSON.
 	#
-	if [ -s "$output" ]; then
+	# IMPORTANT:
+	# Do not json_load() here. json_load() replaces the current
+	# JSHN context and would destroy the host object currently
+	# being constructed.
+	#
+	if [ -s "$output" ] && jsonfilter -q -s "$(cat "$output")" -e '@' >/dev/null 2>&1; then
+
 		data=$(cat "$output")
 
-		if json_load "$data" 2>/dev/null; then
-			#
-			# Copy known fields from agent JSON.
-			#
-			for field in \
-				mac \
-				hostname \
-				model \
-				software \
-				uptime \
-				load \
-				clients2g \
-				clients5g \
-				clients6g \
-				channels2g \
-				channels5g \
-				channels6g
-			do
-				if json_get_var value "$field"; then
-					json_add_string "$field" "$value"
-				fi
-			done
+		#
+		# Scalar fields.
+		#
+		_add_json_string_field "$data" "mac"
+		_add_json_string_field "$data" "hostname"
+		_add_json_string_field "$data" "model"
+		_add_json_string_field "$data" "software"
+		_add_json_string_field "$data" "uptime"
+		_add_json_string_field "$data" "load"
+		_add_json_string_field "$data" "clients2g"
+		_add_json_string_field "$data" "clients5g"
+		_add_json_string_field "$data" "clients6g"
+		_add_json_string_field "$data" "channels2g"
+		_add_json_string_field "$data" "channels5g"
+		_add_json_string_field "$data" "channels6g"
 
-			#
-			# Client lists
-			#
-			for band in 2g 5g 6g; do
-				if json_get_var value "clientslist${band}"; then
-					json_add_raw "clientslist${band}" "$value"
-				fi
-			done
-		fi
+		#
+		# Client lists are arrays. Preserve them as JSON arrays.
+		#
+		_add_json_raw_field "$data" "clientslist2g"
+		_add_json_raw_field "$data" "clientslist5g"
+		_add_json_raw_field "$data" "clientslist6g"
 	fi
 
 	json_close_object
+}
+
+
+#
+# Add a scalar JSON field without changing the current JSHN context.
+#
+_add_json_string_field() {
+	local data="$1"
+	local field="$2"
+	local value
+
+	value=$(jsonfilter -q -s "$data" -e "@.${field}" 2>/dev/null)
+
+	[ -n "$value" ] || return 0
+
+	json_add_string "$field" "$value"
+}
+
+
+#
+# Add an arbitrary JSON value without changing the current JSHN context.
+#
+_add_json_raw_field() {
+	local data="$1"
+	local field="$2"
+	local value
+
+	value=$(jsonfilter -q -s "$data" -e "@.${field}" 2>/dev/null)
+
+	[ -n "$value" ] || return 0
+
+	json_add_raw "$field" "$value"
 }
 
 
@@ -136,7 +162,6 @@ show_activity() {
 	local section="$1"
 	local ipaddr
 	local logfile
-	local line
 	local timestamp
 	local value
 
@@ -149,7 +174,7 @@ show_activity() {
 	[ -n "$ipaddr" ] || {
 		json_close_array
 		json_dump
-		return
+		return 0
 	}
 
 	logfile="${BASEPATH}/${ipaddr}.txt"
@@ -157,7 +182,7 @@ show_activity() {
 	[ -f "$logfile" ] || {
 		json_close_array
 		json_dump
-		return
+		return 0
 	}
 
 	while read -r timestamp value; do
@@ -215,6 +240,7 @@ case "$1" in
 
 	list)
 		json_init
+
 		json_add_object "activity"
 		json_close_object
 
@@ -237,9 +263,7 @@ case "$1" in
 			activity)
 				read -r input
 				json_load "$input" 2>/dev/null
-
 				json_get_var section section
-
 				show_activity "$section"
 				;;
 
