@@ -1649,413 +1649,230 @@ return view.extend({
 		 *
 		 * Therefore -O is deliberately used below.
 		 */
-		s.actionExec = function(section_id) {
-			const row =
-				this.cfgvalue(section_id);
+		s.actionExec=function(section_id){
+	const row=this.cfgvalue(section_id);
 
-			return callAPControllerScripts()
-				.then(res => {
-					res.scripts =
-						res.scripts || [];
+	return callAPControllerScripts().then(function(res){
+		res.scripts.sort((a,b)=>a.file.localeCompare(b.file));
 
-					res.scripts.sort(
-						(a, b) =>
-							a.file.localeCompare(
-								b.file
-							)
-					);
+		let options=[];
+		res.scripts.forEach(s=>{
+			options.push(E('option',{
+				'data-warn':s.warn,
+				'value':s.file
+			},[s.description]));
+		});
 
-					const options = [];
+		ui.showModal(_('Execute script'),[
+			E('div',{
+				'style':'display:flex;gap:8px;align-items:center;'
+			},[
+				E('select',{
+					'id':'actionexecscript',
+					'style':'width:100%'
+				},options),
 
-					res.scripts.forEach(script => {
-						options.push(
-							E(
-								'option',
-								{
-									'data-warn':
-										script.warn,
-									'value':
-										script.file
-								},
-								[script.description]
-							)
-						);
-					});
+				E('div',{'class':'right'},[
+					E('button',{
+						'class':'cbi-button cbi-button-primary',
+						'click':ui.createHandlerFn(this,async function(){
 
-					if (options.length === 0) {
-						ui.showModal(
-							_('Execute script'),
-							[
-								E(
-									'p',
-									_('No scripts available.')
-								),
-								E(
-									'div',
-									{ 'class': 'right' },
-									[
-										E(
-											'button',
-											{
-												'class':
-													'cbi-button cbi-button-primary',
-												'click':
-													ui.hideModal
-											},
-											_('Dismiss')
-										)
-									]
-								)
-							]
-						);
+							const stdout=document.querySelector('#actionexecstdout');
+							const stderr=document.querySelector('#actionexecstderr');
 
-						return;
-					}
+							if(stdout) stdout.value='';
+							if(stderr) stderr.value='';
 
-					ui.showModal(
-						_('Execute script'),
-						[
-							E(
-								'div',
-								{
-									'style':
-										'display:flex;' +
-										'gap:8px;' +
-										'align-items:center;'
-								},
-								[
-									E(
-										'select',
-										{
-											'id':
-												'actionexecscript',
-											'style':
-												'width:100%'
-										},
-										options
-									),
+							const select=document.querySelector('#actionexecscript');
+							if(!select || !select.options.length)
+								return;
 
-									E(
-										'div',
-										{
-											'class':
-												'right'
-										},
-										[
-											E(
-												'button',
-												{
-													'class':
-														'cbi-button cbi-button-primary',
-													'click':
-														ui.createHandlerFn(
-															this,
-															async function() {
-																const stdout =
-																	document.querySelector(
-																		'#actionexecstdout'
-																	);
+							const selectedOption=select.options[select.selectedIndex];
+							const script=selectedOption.value;
+							const description=selectedOption.text;
+							const warn=selectedOption.getAttribute('data-warn');
 
-																const stderr =
-																	document.querySelector(
-																		'#actionexecstderr'
-																	);
+							if(warn=='1'){
+								if(!confirm(
+									_('Are you sure you want to execute the "%s" script?')
+									.format(description)
+								))
+									return;
+							}
 
-																if (stdout)
-																	stdout.value = '';
+							const sshCommon=[
+								'-o','StrictHostKeyChecking=accept-new',
+								'-o','HostKeyAlgorithms=+ssh-rsa',
+								'-o','PubkeyAcceptedAlgorithms=+ssh-rsa'
+							];
 
-																if (stderr)
-																	stderr.value = '';
+							let cmd;
+							let args;
 
-																const select =
-																	document.querySelector(
-																		'#actionexecscript'
-																	);
+							/*
+							 * Ubiquiti / old OpenSSH:
+							 *
+							 * - only ssh-rsa/ssh-dss host keys
+							 * - no SFTP subsystem
+							 *
+							 * Therefore use legacy scp mode (-O).
+							 */
 
-																if (!select)
-																	return;
+							if(row['usekeyfile'] && row['keyfile']){
 
-																const selectedOption =
-																	select.options[
-																		select.selectedIndex
-																	];
+								cmd='scp';
 
-																const script =
-																	selectedOption.value;
+								args=[
+									'-O',
+									'-i',row['keyfile'],
+									...sshCommon,
+									'-P',row['port'],
+									'/usr/share/apcontroller/scripts/'+script,
+									row['username']+'@'+row['ipaddr']+':/tmp/'
+								];
 
-																const description =
-																	selectedOption.text;
+							}else{
 
-																const warn =
-																	selectedOption.getAttribute(
-																		'data-warn'
-																	);
+								cmd='sshpass';
 
-																if (
-																	warn == '1' &&
-																	!confirm(
-																		_(
-																			'Are you sure you want to execute the "%s" script?'
-																		).format(
-																			description
-																		)
-																	)
-																)
-																	return;
+								args=[
+									'-p',
+									typeof row['password']!=='undefined'
+										? row['password']
+										: '""',
+									'scp',
+									'-O',
+									...sshCommon,
+									'-P',row['port'],
+									'/usr/share/apcontroller/scripts/'+script,
+									row['username']+'@'+row['ipaddr']+':/tmp/'
+								];
+							}
 
-																let cmd;
-																let args;
+							/*
+							 * First copy the script.
+							 */
+							return fs.exec(cmd,args).then(function(copyres){
 
-																/*
-																 * KEY FILE
-																 *
-																 * -O = legacy SCP protocol.
-																 * Without this OpenSSH scp tries
-																 * to start sftp-server remotely.
-																 */
-																if (
-																	row['usekeyfile'] &&
-																	row['keyfile']
-																) {
-																	cmd = 'scp';
+								if(copyres.stdout && stdout)
+									stdout.value=copyres.stdout;
 
-																	args = [
-																		'-O',
-																		'-i',
-																		row['keyfile'],
-																		'-o',
-																		'StrictHostKeyChecking=accept-new',
-																		'-P',
-																		row['port'],
-																		'/usr/share/apcontroller/scripts/' +
-																			script,
-																		row['username'] +
-																			'@' +
-																			row['ipaddr'] +
-																			':/tmp'
-																	];
-																}
-																else {
-																	cmd = 'sshpass';
+								if(copyres.stderr && stderr)
+									stderr.value=copyres.stderr;
 
-																	args = [
-																		'-p',
-																		typeof row['password'] !==
-																		'undefined'
-																			? row['password']
-																			: '""',
+								/*
+								 * Do not execute the remote script if SCP failed.
+								 */
+								if(copyres.code!==0)
+									throw new Error(
+										copyres.stderr ||
+										_('Unable to copy script to device')
+									);
 
-																		'scp',
+								/*
+								 * Now execute it over SSH.
+								 */
+								if(row['usekeyfile'] && row['keyfile']){
 
-																		/*
-																		 * THIS IS THE FIX
-																		 */
-																		'-O',
+									cmd='ssh';
 
-																		'-o',
-																		'StrictHostKeyChecking=accept-new',
+									args=[
+										'-q',
+										'-i',row['keyfile'],
+										...sshCommon,
+										'-p',row['port'],
+										row['username']+'@'+row['ipaddr'],
+										'sh',
+										'/tmp/'+script
+									];
 
-																		'-P',
-																		row['port'],
+								}else{
 
-																		'/usr/share/apcontroller/scripts/' +
-																			script,
+									cmd='sshpass';
 
-																		row['username'] +
-																			'@' +
-																			row['ipaddr'] +
-																			':/tmp'
-																	];
-																}
+									args=[
+										'-p',
+										typeof row['password']!=='undefined'
+											? row['password']
+											: '""',
+										'ssh',
+										'-q',
+										...sshCommon,
+										'-p',row['port'],
+										row['username']+'@'+row['ipaddr'],
+										'sh',
+										'/tmp/'+script
+									];
+								}
 
-																/*
-																 * First upload script.
-																 */
-																const upload =
-																	await fs.exec(
-																		cmd,
-																		args
-																	);
+								return fs.exec(cmd,args).then(function(execres){
 
-																if (
-																	upload.code !==
-																		0 &&
-																	!upload.stdout &&
-																	upload.stderr
-																) {
-																	if (
-																		stderr
-																	)
-																		stderr.value =
-																			upload.stderr;
+									if(execres.stdout && stdout)
+										stdout.value=execres.stdout;
 
-																	return;
-																}
+									if(execres.stderr && stderr){
+										let err=execres.stderr;
 
-																/*
-																 * Then execute it remotely.
-																 */
-																if (
-																	row['usekeyfile'] &&
-																	row['keyfile']
-																) {
-																	cmd = 'ssh';
+										err=err.replace(
+											/^.*Caution, skipping hostkey check for [\d.]+\n\n/,
+											''
+										);
 
-																	args = [
-																		'-q',
-																		'-i',
-																		row['keyfile'],
-																		'-o',
-																		'StrictHostKeyChecking=accept-new',
-																		'-p',
-																		row['port'],
-																		row['username'] +
-																			'@' +
-																			row['ipaddr'],
-																		'sh',
-																		'/tmp/' +
-																			script
-																	];
-																}
-																else {
-																	cmd = 'sshpass';
+										stderr.value=err;
+									}
 
-																	args = [
-																		'-p',
-																		typeof row['password'] !==
-																		'undefined'
-																			? row['password']
-																			: '""',
+									if(execres.code!==0 && stderr && !stderr.value)
+										stderr.value=_('Remote script exited with code %s')
+											.format(execres.code);
 
-																		'ssh',
-																		'-q',
-																		'-o',
-																		'StrictHostKeyChecking=accept-new',
-																		'-p',
-																		row['port'],
-																		row['username'] +
-																			'@' +
-																			row['ipaddr'],
-																		'sh',
-																		'/tmp/' +
-																			script
-																	];
-																}
+								}).catch(function(err){
 
-																try {
-																	const execres =
-																		await fs.exec(
-																			cmd,
-																			args
-																		);
+									if(stderr)
+										stderr.value=err.message || err;
 
-																	if (
-																		stdout &&
-																		execres.stdout
-																	)
-																		stdout.value =
-																			execres.stdout;
+								});
 
-																	if (
-																		stderr &&
-																		execres.stderr
-																	) {
-																		let error =
-																			execres.stderr;
+							}).catch(function(err){
 
-																		error =
-																			error.replace(
-																				/^.*Caution, skipping hostkey check for [\d\.]+\n\n/,
-																				''
-																			);
+								if(stderr)
+									stderr.value=err.message || err;
 
-																		if (error)
-																			stderr.value =
-																				error;
-																	}
-																}
-																catch (err) {
-																	if (stderr)
-																		stderr.value =
-																			err;
-																}
-															}
-														)
-												},
-												_('Execute')
-											)
-										]
-									)
-								]
-							),
+							});
 
-							E(
-								'span',
-								_('Result')
-							),
+						})
+					},[_('Execute')])
+				])
+			]),
 
-							E(
-								'textarea',
-								{
-									'id':
-										'actionexecstdout',
-									'spellcheck':
-										'false',
-									'wrap':
-										'off',
-									'rows':
-										25,
-									'style':
-										'white-space:nowrap'
-								},
-								[]
-							),
+			E('span',_('Result')),
 
-							E(
-								'span',
-								_('Errors')
-							),
+			E('textarea',{
+				'id':'actionexecstdout',
+				'spellcheck':'false',
+				'wrap':'off',
+				'rows':25,
+				'style':'width:100%;white-space:nowrap'
+			},[]),
 
-							E(
-								'textarea',
-								{
-									'id':
-										'actionexecstderr',
-									'spellcheck':
-										'false',
-									'wrap':
-										'off',
-									'rows':
-										10,
-									'style':
-										'white-space:nowrap'
-								},
-								[]
-							),
+			E('span',_('Errors')),
 
-							E(
-								'div',
-								{
-									'class':
-										'right'
-								},
-								[
-									E(
-										'button',
-										{
-											'class':
-												'cbi-button cbi-button-primary',
-											'click':
-												ui.hideModal
-										},
-										_('Dismiss')
-									)
-								]
-							)
-						]
-					);
-				});
-		};
+			E('textarea',{
+				'id':'actionexecstderr',
+				'spellcheck':'false',
+				'wrap':'off',
+				'rows':10,
+				'style':'width:100%;white-space:nowrap'
+			},[]),
+
+			E('div',{'class':'right'},[
+				E('button',{
+					'class':'cbi-button cbi-button-primary',
+					'click':ui.hideModal
+				},[_('Dismiss')])
+			])
+		]);
+	});
+};
 
 		/*
 		 * HOST OPTIONS
