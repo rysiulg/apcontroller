@@ -2,28 +2,23 @@
 
 # ============================================================
 # apcontroller-agent-omada
+#
 # TP-Link Omada EAP 5.x
 #
-# Komunikacja:
-#   OpenWrt -> SSH -> EAP CLI
+# OpenWrt -> SSH -> EAP CLI
 #
-# WAŻNE:
-#   - NIE używa scp
-#   - NIE używa tftp
-#   - NIE tworzy plików na EAP
-#   - komendy są wysyłane bezpośrednio do EAP CLI
+# Wymaga:
+#   sexpect
+#   ssh
+#
+# NIE używa sleep.
+# NIE używa scp.
+# NIE używa tftp.
 #
 # Usage:
 #
-#   apcontroller-agent-omada <host> <user> <password> [port]
 #   apcontroller-agent-omada poll <host> <user> <password> [port]
-#
-# Example:
-#
-#   apcontroller-agent-omada 192.168.88.77 admin 'password'
-#
-#   apcontroller-agent-omada poll 192.168.88.77 admin 'password'
-#
+#  wymaga pakietu sexact
 # ============================================================
 
 
@@ -43,7 +38,6 @@ USER="$2"
 PASSWORD="$3"
 PORT="${4:-22}"
 
-
 if [ -z "$HOST" ] || [ -z "$USER" ] || [ -z "$PASSWORD" ]; then
 	echo "usage: $0 [poll] <host> <user> <password> [port]" >&2
 	exit 2
@@ -54,28 +48,48 @@ fi
 # DEPENDENCIES
 # ------------------------------------------------------------
 
-command -v sshpass >/dev/null 2>&1 || {
-	echo "sshpass not found" >&2
+command -v sexpect >/dev/null 2>&1 || {
+	echo '{"error":"sexpect not found"}'
 	exit 127
 }
 
 command -v ssh >/dev/null 2>&1 || {
-	echo "ssh not found" >&2
+	echo '{"error":"ssh not found"}'
 	exit 127
 }
+
+
+# ------------------------------------------------------------
+# SOCKET
+# ------------------------------------------------------------
+
+SOCK="/tmp/apcontroller-omada-$$.sock"
+
+rm -f "$SOCK"
+
+export SEXPECT_SOCKFILE="$SOCK"
+
+
+# ------------------------------------------------------------
+# CLEANUP
+# ------------------------------------------------------------
+
+cleanup()
+{
+	sexpect close >/dev/null 2>&1
+	rm -f "$SOCK"
+}
+
+trap cleanup EXIT INT TERM
 
 
 # ------------------------------------------------------------
 # SSH OPTIONS
 # ------------------------------------------------------------
 
-KNOWN_HOSTS="/tmp/apcontroller-omada-known_hosts"
-
 SSH_OPTS="
--q
--T
--o StrictHostKeyChecking=accept-new
--o UserKnownHostsFile=$KNOWN_HOSTS
+-o StrictHostKeyChecking=no
+-o UserKnownHostsFile=/tmp/apcontroller-omada-known_hosts
 -o ConnectTimeout=8
 -o ServerAliveInterval=5
 -o ServerAliveCountMax=2
@@ -87,75 +101,126 @@ SSH_OPTS="
 
 
 # ------------------------------------------------------------
-# RUN EAP CLI
-#
-# Komendy idą przez stdin.
-#
-# NIE:
-#   ssh host "sh script"
-#
-# TAK:
-#   printf commands | ssh host
-#
-# Dzięki temu niczego nie trzeba tworzyć na EAP.
+# SPAWN SSH
 # ------------------------------------------------------------
 
-run_cli()
+sexpect spawn -t 20 ssh -tt $SSH_OPTS "$USER@$HOST" \
+	>/dev/null 2>&1
+
+if [ $? -ne 0 ]; then
+	echo '{"error":"cannot spawn ssh"}'
+	exit 1
+fi
+
+
+# ------------------------------------------------------------
+# LOGIN
+#
+# Czekamy na password:
+# ------------------------------------------------------------
+
+if sexpect expect -timeout 10 -nocase -re 'password:' \
+	>/dev/null 2>&1
+then
+	sexpect send -enter -- "$PASSWORD" >/dev/null 2>&1
+fi
+
+
+# ------------------------------------------------------------
+# WAIT FOR EAP PROMPT
+#
+# WAŻNE:
+#
+# Dopiero tutaj wysyłamy enable.
+#
+# Nie ma sleep.
+# ------------------------------------------------------------
+
+if ! sexpect expect -timeout 15 -re 'EAP>' \
+	>/dev/null 2>&1
+then
+	echo '{"error":"EAP prompt not found"}'
+	exit 1
+fi
+
+
+# ------------------------------------------------------------
+# ENABLE
+# ------------------------------------------------------------
+
+sexpect send -enter -- 'enable' >/dev/null 2>&1
+
+if ! sexpect expect -timeout 10 -re 'EAP#' \
+	>/dev/null 2>&1
+then
+	echo '{"error":"EAP enable failed"}'
+	exit 1
+fi
+
+
+# ------------------------------------------------------------
+# RUN COMMAND
+#
+# Po wysłaniu komendy:
+#
+#   command echo
+#   wynik
+#   EAP#
+#
+# łapiemy wszystko przed EAP# jako grupa 1.
+#
+# (.|\n) działa tutaj dlatego, że sexpect używa ERE
+# i bez REG_NEWLINE kropka obejmuje newline.
+#
+# ------------------------------------------------------------
+
+run_cmd()
 {
-	sshpass -p "$PASSWORD" ssh $SSH_OPTS "$USER@$HOST" 2>/dev/null
+	CMD="$1"
+
+	sexpect send -enter -- "$CMD" >/dev/null 2>&1
+
+	if ! sexpect expect -timeout 20 \
+		-re '(.|\n)*EAP#' \
+		>/dev/null 2>&1
+	then
+		return 1
+	fi
+
+	sexpect expect_out -index 0 |
+		sed 's/EAP#$//' |
+		sed "1{/^[[:space:]]*$CMD[[:space:]]*$/d;}"
 }
 
 
 # ------------------------------------------------------------
-# COMMAND LIST
+# COMMANDS
 # ------------------------------------------------------------
 
-COMMANDS='enable
-show version
-show uptime
-show memory summary
-show network status
-show wifi detail
-show station info
-show traffic
-show controller-ip
-show device-id
-show status cloud
-show status device
-show date
-show temperature
-'
+VERSION_RAW=$(run_cmd 'show version')
+UPTIME_RAW=$(run_cmd 'show uptime')
+MEMORY_RAW=$(run_cmd 'show memory summary')
+NETWORK_RAW=$(run_cmd 'show network status')
+WIFI_RAW=$(run_cmd 'show wifi detail')
+STATION_RAW=$(run_cmd 'show station info')
+TRAFFIC_RAW=$(run_cmd 'show traffic')
+DEVICE_RAW=$(run_cmd 'show device-id')
+CLOUD_RAW=$(run_cmd 'show status cloud')
 
 
 # ------------------------------------------------------------
-# POLL
+# REMOVE CR
 # ------------------------------------------------------------
 
-if [ "$POLL" = "1" ]; then
-
-	RAW=$(
-		printf '%s\n' "$COMMANDS" |
-		run_cli
-	)
-
-else
-
-	RAW=$(
-		printf '%s\n' "$COMMANDS" |
-		run_cli
-	)
-
-fi
-
-
-# ------------------------------------------------------------
-# NO RESPONSE
-# ------------------------------------------------------------
-
-if [ -z "$RAW" ]; then
-	echo '{"error":"No response from Omada EAP"}'
-	exit 1
-fi
+VERSION_RAW=$(printf '%s' "$VERSION_RAW" | tr -d '\r')
+UPTIME_RAW=$(printf '%s' "$UPTIME_RAW" | tr -d '\r')
+MEMORY_RAW=$(printf '%s' "$MEMORY_RAW" | tr -d '\r')
+NETWORK_RAW=$(printf '%s' "$NETWORK_RAW" | tr -d '\r')
+WIFI_RAW=$(printf '%s' "$WIFI_RAW" | tr -d '\r')
+STATION_RAW=$(printf '%s' "$STATION_RAW" | tr -d '\r')
+TRAFFIC_RAW=$(printf '%s' "$TRAFFIC_RAW" | tr -d '\r')
+DEVICE_RAW=$(printf '%s' "$DEVICE_RAW" | tr -d '\r')
+CLOUD_RAW=$(printf '%s' "$CLOUD_RAW" | tr -d '\r')
 
 
 # ------------------------------------------------------------
@@ -169,11 +234,15 @@ json_escape()
 	{
 		gsub(/\\/,"\\\\")
 		gsub(/"/,"\\\"")
-		gsub(/\r/,"")
 		gsub(/\t/,"\\t")
 		print
 	}'
 }
+
+
+# ============================================================
+# BASIC INFO
+# ============================================================
 
 
 # ------------------------------------------------------------
@@ -181,7 +250,7 @@ json_escape()
 # ------------------------------------------------------------
 
 VERSION=$(
-	printf '%s\n' "$RAW" |
+	printf '%s\n' "$VERSION_RAW" |
 	grep 'Build ' |
 	head -n1 |
 	sed 's/^[[:space:]]*//'
@@ -190,21 +259,79 @@ VERSION=$(
 
 # ------------------------------------------------------------
 # UPTIME
+#
+# OpenWrt/API potrzebuje uptime w sekundach.
+#
+# Przykład EAP:
+#
+#   00:49:27 up 5 days,  2:24,  load average: ...
+#
+# Wynik:
+#
+#   440640
 # ------------------------------------------------------------
 
 UPTIME=$(
-	printf '%s\n' "$RAW" |
-	sed -n 's/.*up \([^,]*\), load average:.*/\1/p' |
-	head -n1
-)
+	printf '%s\n' "$UPTIME_RAW" |
+	awk '
+		{
+			days=0
+			hours=0
+			minutes=0
+			seconds=0
 
+			for (i=1; i<=NF; i++) {
+
+				if ($i == "up") {
+					for (j=i+1; j<=NF; j++) {
+
+						x=$j
+						gsub(/,/,"",x)
+
+						if (x == "load")
+							break
+
+						if (x ~ /^[0-9]+$/ && j < NF) {
+							if ($(j+1) ~ /^days?,?$/) {
+								days=x
+								continue
+							}
+						}
+
+						if (x ~ /^[0-9]+:[0-9]+$/) {
+							split(x,t,":")
+							hours=t[1]
+							minutes=t[2]
+							continue
+						}
+
+						if (x ~ /^[0-9]+:[0-9]+:[0-9]+$/) {
+							split(x,t,":")
+							hours=t[1]
+							minutes=t[2]
+							seconds=t[3]
+							continue
+						}
+					}
+
+					print (days * 86400) + \
+					      (hours * 3600) + \
+					      (minutes * 60) + \
+					      seconds
+
+					exit
+				}
+			}
+		}
+	'
+)
 
 # ------------------------------------------------------------
 # LOAD
 # ------------------------------------------------------------
 
 LOAD=$(
-	printf '%s\n' "$RAW" |
+	printf '%s\n' "$UPTIME_RAW" |
 	sed -n 's/.*load average:[[:space:]]*\(.*\)$/\1/p' |
 	head -n1
 )
@@ -215,7 +342,7 @@ LOAD=$(
 # ------------------------------------------------------------
 
 IP=$(
-	printf '%s\n' "$RAW" |
+	printf '%s\n' "$NETWORK_RAW" |
 	awk '
 		/^br0[[:space:]]/ {
 			inbr=1
@@ -237,9 +364,9 @@ IP=$(
 # ------------------------------------------------------------
 
 MAC=$(
-	printf '%s\n' "$RAW" |
+	printf '%s\n' "$NETWORK_RAW" |
 	awk '
-		/^eth0[[:space:]]/ {
+		/^br0[[:space:]]/ {
 			for (i=1;i<=NF;i++) {
 				if ($i=="HWaddr") {
 					print $(i+1)
@@ -253,23 +380,21 @@ MAC=$(
 
 # ------------------------------------------------------------
 # DEVICE ID
-#
-# Nie używamy {40}, bo różne BusyBox awk mogą tego nie obsługiwać.
 # ------------------------------------------------------------
 
 DEVICE_ID=$(
-	printf '%s\n' "$RAW" |
+	printf '%s\n' "$DEVICE_RAW" |
 	grep -E '^[0-9A-Fa-f]{40}$' |
 	head -n1
 )
 
 
 # ------------------------------------------------------------
-# CLOUD STATUS
+# CLOUD
 # ------------------------------------------------------------
 
 CLOUD=$(
-	printf '%s\n' "$RAW" |
+	printf '%s\n' "$CLOUD_RAW" |
 	sed -n 's/^Cloud Status:[[:space:]]*//p' |
 	head -n1
 )
@@ -280,20 +405,20 @@ CLOUD=$(
 # ------------------------------------------------------------
 
 RAM_TOTAL=$(
-	printf '%s\n' "$RAW" |
+	printf '%s\n' "$MEMORY_RAW" |
 	sed -n 's/^MemTotal:[[:space:]]*\([0-9][0-9]*\) kB/\1/p' |
 	head -n1
 )
 
 RAM_FREE=$(
-	printf '%s\n' "$RAW" |
+	printf '%s\n' "$MEMORY_RAW" |
 	sed -n 's/^MemFree:[[:space:]]*\([0-9][0-9]*\) kB/\1/p' |
 	head -n1
 )
 
 
 # ------------------------------------------------------------
-# JSON ESCAPE VALUES
+# ESCAPE
 # ------------------------------------------------------------
 
 VERSION=$(json_escape "$VERSION")
@@ -305,9 +430,9 @@ DEVICE_ID=$(json_escape "$DEVICE_ID")
 CLOUD=$(json_escape "$CLOUD")
 
 
-# ------------------------------------------------------------
+# ============================================================
 # JSON START
-# ------------------------------------------------------------
+# ============================================================
 
 printf '{'
 
@@ -331,85 +456,177 @@ printf '"wifi":['
 
 FIRST=1
 
-printf '%s\n' "$RAW" |
-while IFS= read -r LINE
+printf '%s\n' "$WIFI_RAW" |
+awk '
+	# --------------------------------------------------------
+	# Nowy interfejs
+	# --------------------------------------------------------
+
+	$1 ~ /^ath[0-9]+$/ && $2 == "IEEE" {
+
+		# Jeżeli poprzedni interfejs był kompletny,
+		# wypisz go teraz.
+		if (iface != "" && freq != "") {
+
+			if (freq < 3)
+				band="2g"
+			else if (freq < 6)
+				band="5g"
+			else
+				band="6g"
+
+			printf "%s\t%s\t%s\t%s\t%s\n", \
+				iface, essid, freq, band, bssid
+		}
+
+		# Nowy interfejs
+		iface=$1
+		essid=""
+		freq=""
+		bssid=""
+
+		# ESSID jest w tej samej linii
+		if (match($0, /ESSID:"[^"]*"/)) {
+			x=substr($0, RSTART, RLENGTH)
+			sub(/^ESSID:"/, "", x)
+			sub(/"$/, "", x)
+			essid=x
+		}
+
+		next
+	}
+
+	# --------------------------------------------------------
+	# Frequency
+	# --------------------------------------------------------
+
+	/^[[:space:]]*Mode:/ {
+
+		if (match($0, /Frequency:[0-9.]+ GHz/)) {
+			x=substr($0, RSTART, RLENGTH)
+			sub(/^Frequency:/, "", x)
+			sub(/[[:space:]]+GHz$/, "", x)
+			freq=x
+		}
+
+		if (match($0, /Access Point:[[:space:]]*[0-9A-Fa-f:]+/)) {
+			x=substr($0, RSTART, RLENGTH)
+			sub(/^Access Point:[[:space:]]*/, "", x)
+			bssid=x
+		}
+
+		next
+	}
+
+	# --------------------------------------------------------
+	# Koniec danych
+	# --------------------------------------------------------
+
+	END {
+		if (iface != "" && freq != "") {
+
+			if (freq < 3)
+				band="2g"
+			else if (freq < 6)
+				band="5g"
+			else
+				band="6g"
+
+			printf "%s\t%s\t%s\t%s\t%s\n", \
+				iface, essid, freq, band, bssid
+		}
+	}
+' |
+while IFS='	' read -r IFACE SSID FREQ BAND BSSID
 do
 
-	case "$LINE" in
+	[ -n "$IFACE" ] || continue
 
-		ath[0-9]*" IEEE "*)
-			IFACE=$(printf '%s\n' "$LINE" | awk '{print $1}')
+	[ "$FIRST" = "1" ] || printf ','
+	FIRST=0
 
-			SSID=$(
-				printf '%s\n' "$LINE" |
-				sed -n 's/.*ESSID:"\([^"]*\)".*/\1/p'
-			)
-
-			FREQ=$(
-				printf '%s\n' "$LINE" |
-				sed -n 's/.*Frequency:\([0-9.]*\) GHz.*/\1/p'
-			)
-
-			BSSID=$(
-				printf '%s\n' "$LINE" |
-				sed -n 's/.*Access Point:[[:space:]]*\([0-9A-Fa-f:]*\).*/\1/p'
-			)
-
-			[ -n "$FREQ" ] || continue
-
-			BAND=$(
-				awk -v f="$FREQ" '
-					BEGIN {
-						if (f < 3)
-							print "2g"
-						else if (f < 6)
-							print "5g"
-						else
-							print "6g"
-					}
-				'
-			)
-
-			[ "$FIRST" = "1" ] || printf ','
-			FIRST=0
-
-			printf '{'
-			printf '"ifname":"%s",' "$IFACE"
-			printf '"ssid":"%s",' "$(json_escape "$SSID")"
-			printf '"frequency":"%s",' "$FREQ"
-			printf '"band":"%s",' "$BAND"
-			printf '"bssid":"%s"' "$BSSID"
-			printf '}'
-
-			;;
-
-	esac
+	printf '{'
+	printf '"ifname":"%s",' "$(json_escape "$IFACE")"
+	printf '"ssid":"%s",' "$(json_escape "$SSID")"
+	printf '"frequency":"%s",' "$FREQ"
+	printf '"band":"%s",' "$BAND"
+	printf '"bssid":"%s"' "$(json_escape "$BSSID")"
+	printf '}'
 
 done
 
 printf '],'
 
-
 # ============================================================
 # CLIENTS
+#
+# STATION_RAW zawiera już WYŁĄCZNIE wynik:
+#
+#   show station info
+#
+# run_cmd() usuwa echo komendy "show station info",
+# więc nie szukamy tutaj tej linii.
 # ============================================================
 
 printf '"clients":['
 
 FIRST=1
 
-printf '%s\n' "$RAW" |
-awk '
-/^ath[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-]/ {
-
-	print $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $6 "|" $7 "|" $8
-
-}
-' |
-while IFS='|' read IFACE CHANNEL MACADDR TXRATE RXRATE RSSI CONNECTED INACTIVE
+printf '%s\n' "$STATION_RAW" |
+while IFS= read -r LINE
 do
+	# --------------------------------------------------------
+	# END OF STATION TABLE
+	# --------------------------------------------------------
 
-	[ -n "$MACADDR" ] || continue
+	case "$LINE" in
+		total\ *associated\ stations*)
+			break
+			;;
+	esac
+
+	# --------------------------------------------------------
+	# HEADER / SEPARATOR / EMPTY
+	# --------------------------------------------------------
+
+	case "$LINE" in
+		"ifname |"*|"---"*|"")
+			continue
+			;;
+	esac
+
+	# --------------------------------------------------------
+	# STATION FORMAT:
+	#
+	# ath0  6  20-e1-5d-ee-db-ce  35M  1M  -71  16350s  0s
+	# --------------------------------------------------------
+
+	IFACE=$(printf '%s\n' "$LINE" | awk '
+		$1 ~ /^ath[0-9]+$/ &&
+		$2 ~ /^[0-9]+$/ &&
+		$3 ~ /^[0-9A-Fa-f-]{17}$/ &&
+		$6 ~ /^-?[0-9]+$/ {
+			print $1
+			exit
+		}
+	')
+
+	[ -n "$IFACE" ] || continue
+
+	CHANNEL=$(printf '%s\n' "$LINE" | awk '{print $2}')
+	MACADDR=$(printf '%s\n' "$LINE" | awk '{print $3}')
+	TXRATE=$(printf '%s\n' "$LINE" | awk '{print $4}')
+	RXRATE=$(printf '%s\n' "$LINE" | awk '{print $5}')
+	RSSI=$(printf '%s\n' "$LINE" | awk '{print $6}')
+	CONNECTED=$(printf '%s\n' "$LINE" | awk '{print $7}')
+	INACTIVE=$(printf '%s\n' "$LINE" | awk '{print $8}')
+
+	# --------------------------------------------------------
+	# MAC
+	# xx-xx-xx-xx-xx-xx
+	# ->
+	# XX:XX:XX:XX:XX:XX
+	# --------------------------------------------------------
 
 	MACADDR=$(
 		printf '%s' "$MACADDR" |
@@ -417,27 +634,21 @@ do
 		sed 's/-/:/g'
 	)
 
-
 	# --------------------------------------------------------
 	# BAND
 	# --------------------------------------------------------
 
 	case "$IFACE" in
-
 		ath0|ath1|ath2)
 			BAND="2g"
 			;;
-
 		ath10|ath11|ath12)
 			BAND="5g"
 			;;
-
 		*)
 			BAND="unknown"
 			;;
-
 	esac
-
 
 	# --------------------------------------------------------
 	# JSON
@@ -447,7 +658,6 @@ do
 	FIRST=0
 
 	printf '{'
-
 	printf '"ap":"%s",' "$IFACE"
 	printf '"mac":"%s",' "$MACADDR"
 	printf '"channel":%s,' "$CHANNEL"
@@ -457,13 +667,13 @@ do
 	printf '"connected":"%s",' "$CONNECTED"
 	printf '"inactive":"%s",' "$INACTIVE"
 	printf '"band":"%s"' "$BAND"
-
 	printf '}'
 
 done
 
-
 printf ']'
 printf '}\n'
+
+exit 0
 
 exit 0
