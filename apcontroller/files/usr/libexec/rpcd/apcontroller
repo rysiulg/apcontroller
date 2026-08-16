@@ -4,63 +4,67 @@
 # (c) 2025-2026 Cezary Jackiewicz <cezary@eko.one.pl>
 #
 
-. /usr/share/libubox/jshn.sh
-. /lib/functions.sh
-
 BASEPATH="/tmp/apcontroller"
 
 T=$(uci -q get apcontroller.@global[0].path)
 [ -n "$T" ] && BASEPATH="$T"
 
+mkdir -p "$BASEPATH"
+
+. /lib/functions.sh
+. /usr/share/libubox/jshn.sh
+
 
 #
-# Get host status/data
+# Get data from host
 #
-show_status() {
-	json_init
-	json_add_array "hosts"
-
-	config_load apcontroller
-	config_foreach _show_status_host host
-
-	json_close_array
-	json_dump
-}
-
-
-_show_status_host() {
+show_data_from_host() {
 	local cfg="$1"
-	local enabled
+	local oldns
+	local hostname
+	local model
+	local load
+	local uptime
+	local mac
+	local software
+	local channels2g
+	local channels5g
+	local channels6g
 	local name
 	local ipaddr
+	local port
+	local username
+	local password
+	local enabled
 	local output
-	local platform
 	local platformfile
+	local platform
 	local lastcontact
 	local now
 	local timestamp
-	local data
+	local band
+	local idx
 
 	config_get_bool enabled "$cfg" enabled 1
-	[ "$enabled" -gt 0 ] || return 0
-
 	config_get name "$cfg" name
 	config_get ipaddr "$cfg" ipaddr
+	config_get port "$cfg" port 22
+	config_get username "$cfg" username
+	config_get password "$cfg" password
 
 	[ -n "$ipaddr" ] || return 0
 
 	output="${BASEPATH}/${ipaddr}-${cfg}"
 	platformfile="${output}.platform"
 
-	now=$(date +%s)
 	lastcontact=-1
 
-	if [ -s "$output" ]; then
+	if [ -s "$output" ] && [ "$enabled" = "1" ]; then
 		timestamp=$(date +%s -r "$output" 2>/dev/null)
+		now=$(date +%s)
 
-		if [ -n "$timestamp" ]; then
+		[ -n "$timestamp" ] &&
 			lastcontact=$((now - timestamp))
-		fi
 	fi
 
 	platform="unknown"
@@ -72,86 +76,179 @@ _show_status_host() {
 
 
 	#
-	# Start host object.
+	# Start host object in the main namespace.
 	#
 	json_add_object
 
 	json_add_string "section" "$cfg"
+	json_add_boolean "enabled" "$enabled"
 	json_add_string "name" "$name"
 	json_add_string "ipaddr" "$ipaddr"
+	json_add_int "port" "$port"
+	json_add_string "username" "$username"
+	json_add_string "password" "$password"
 	json_add_string "platform" "$platform"
-	json_add_int "lastcontact" "$lastcontact"
 
 
 	#
-	# Agent output is JSON.
+	# Agent output.
 	#
-	# IMPORTANT:
-	# Do not json_load() here. json_load() replaces the current
-	# JSHN context and would destroy the host object currently
-	# being constructed.
+	# Load it into a separate JSHN namespace.
 	#
-	if [ -s "$output" ] && jsonfilter -q -s "$(cat "$output")" -e '@' >/dev/null 2>&1; then
+	if [ -s "$output" ]; then
 
-		data=$(cat "$output")
+		json_set_namespace host oldns
+
+		if json_load_file "$output" 2>/dev/null; then
+
+			json_get_var hostname hostname
+			json_get_var model model
+			json_get_var load load
+			json_get_var uptime uptime
+			json_get_var mac mac
+			json_get_var software software
+			json_get_var channels2g channels2g
+			json_get_var channels5g channels5g
+			json_get_var channels6g channels6g
+
+			#
+			# Client lists.
+			#
+			for band in 2g 5g 6g; do
+
+				if json_is_a "clientslist${band}" array; then
+
+					#
+					# Return to main host namespace.
+					#
+					json_set_namespace "$oldns"
+
+					json_add_array "clientslist${band}"
+
+					#
+					# Go back to agent namespace.
+					#
+					json_set_namespace host "$oldns"
+
+					json_select "clientslist${band}"
+
+					idx=1
+
+					while json_is_a "$idx" object; do
+
+						json_select "$idx"
+
+						local _ssid
+						local _mac
+						local _rx
+						local _tx
+						local _signal
+						local _connected
+						local _wifi
+						local _ipaddr
+						local _name
+
+						json_get_var _ssid ssid
+						json_get_var _mac mac
+						json_get_var _rx rx
+						json_get_var _tx tx
+						json_get_var _signal signal
+						json_get_var _connected connected
+						json_get_var _wifi wifi
+						json_get_var _ipaddr ipaddr
+						json_get_var _name name
+
+						#
+						# Return to host namespace and add
+						# one client object.
+						#
+						json_set_namespace "$oldns"
+
+						json_add_object
+
+						json_add_string "ssid" "$_ssid"
+						json_add_string "mac" "$_mac"
+						json_add_int "rx" "$_rx"
+						json_add_int "tx" "$_tx"
+						json_add_int "signal" "$_signal"
+						json_add_int "connected" "$_connected"
+						json_add_int "wifi" "$_wifi"
+						json_add_string "ipaddr" "$_ipaddr"
+						json_add_string "name" "$_name"
+
+						json_close_object
+
+						#
+						# Back to agent namespace.
+						#
+						json_set_namespace host "$oldns"
+
+						json_select ..
+
+						idx=$((idx + 1))
+					done
+
+					#
+					# Close array in main namespace.
+					#
+					json_set_namespace "$oldns"
+					json_close_array
+
+					#
+					# Restore agent namespace.
+					#
+					json_set_namespace host "$oldns"
+
+					json_select ..
+
+				fi
+			done
+
+		fi
 
 		#
-		# Scalar fields.
+		# Destroy temporary agent namespace and restore
+		# the main namespace.
 		#
-		_add_json_string_field "$data" "mac"
-		_add_json_string_field "$data" "hostname"
-		_add_json_string_field "$data" "model"
-		_add_json_string_field "$data" "software"
-		_add_json_string_field "$data" "uptime"
-		_add_json_string_field "$data" "load"
-		_add_json_string_field "$data" "clients2g"
-		_add_json_string_field "$data" "clients5g"
-		_add_json_string_field "$data" "clients6g"
-		_add_json_string_field "$data" "channels2g"
-		_add_json_string_field "$data" "channels5g"
-		_add_json_string_field "$data" "channels6g"
+		json_cleanup
+		json_set_namespace "$oldns"
+
 
 		#
-		# Client lists are arrays. Preserve them as JSON arrays.
+		# Copy agent values to host object.
 		#
-		_add_json_raw_field "$data" "clientslist2g"
-		_add_json_raw_field "$data" "clientslist5g"
-		_add_json_raw_field "$data" "clientslist6g"
+		[ -n "$hostname" ] &&
+			json_add_string "hostname" "$hostname"
+
+		[ -n "$model" ] &&
+			json_add_string "model" "$model"
+
+		[ -n "$load" ] &&
+			json_add_string "load" "$load"
+
+		[ -n "$uptime" ] &&
+			json_add_int "uptime" "$uptime"
+
+		[ -n "$mac" ] &&
+			json_add_string "mac" "$mac"
+
+		[ -n "$software" ] &&
+			json_add_string "software" "$software"
+
+		[ -n "$channels2g" ] &&
+			json_add_string "channels2g" "$channels2g"
+
+		[ -n "$channels5g" ] &&
+			json_add_string "channels5g" "$channels5g"
+
+		[ -n "$channels6g" ] &&
+			json_add_string "channels6g" "$channels6g"
 	fi
 
+
+	json_add_int "lastcontact" "$lastcontact"
+
 	json_close_object
-}
-
-
-#
-# Add a scalar JSON field without changing the current JSHN context.
-#
-_add_json_string_field() {
-	local data="$1"
-	local field="$2"
-	local value
-
-	value=$(jsonfilter -q -s "$data" -e "@.${field}" 2>/dev/null)
-
-	[ -n "$value" ] || return 0
-
-	json_add_string "$field" "$value"
-}
-
-
-#
-# Add an arbitrary JSON value without changing the current JSHN context.
-#
-_add_json_raw_field() {
-	local data="$1"
-	local field="$2"
-	local value
-
-	value=$(jsonfilter -q -s "$data" -e "@.${field}" 2>/dev/null)
-
-	[ -n "$value" ] || return 0
-
-	json_add_raw "$field" "$value"
 }
 
 
@@ -159,41 +256,38 @@ _add_json_raw_field() {
 # Activity
 #
 show_activity() {
-	local section="$1"
+	local input
+	local section
 	local ipaddr
+	local enabled
 	local logfile
 	local timestamp
 	local value
 
-	config_load apcontroller
-	config_get ipaddr "$section" ipaddr
+	read -r input
+	json_load "$input" 2>/dev/null
+	json_get_var section section
+
+	ipaddr=$(uci_get "apcontroller" "$section" "ipaddr" "")
+	enabled=$(uci_get "apcontroller" "$section" "enabled" "0")
 
 	json_init
 	json_add_array "activity"
 
-	[ -n "$ipaddr" ] || {
-		json_close_array
-		json_dump
-		return 0
-	}
+	if [ -n "$ipaddr" ] &&
+	   [ "$enabled" = "1" ] &&
+	   [ -s "${BASEPATH}/${ipaddr}.txt" ]; then
 
-	logfile="${BASEPATH}/${ipaddr}.txt"
+		while read -r timestamp value; do
+			[ -n "$timestamp" ] || continue
+			[ -n "$value" ] || continue
 
-	[ -f "$logfile" ] || {
-		json_close_array
-		json_dump
-		return 0
-	}
-
-	while read -r timestamp value; do
-		[ -n "$timestamp" ] || continue
-		[ -n "$value" ] || continue
-
-		json_add_object
-		json_add_int "timestamp" "$timestamp"
-		json_add_int "value" "$value"
-		json_close_object
-	done < "$logfile"
+			json_add_object
+			json_add_int "timestamp" "$timestamp"
+			json_add_int "value" "$value"
+			json_close_object
+		done < "${BASEPATH}/${ipaddr}.txt"
+	fi
 
 	json_close_array
 	json_dump
@@ -213,18 +307,18 @@ show_scripts() {
 
 	for file in /usr/share/apcontroller/scripts/*; do
 		[ -f "$file" ] || continue
-		[ -x "$file" ] || continue
 
-		description="$(sed -n 's/^# Description:[[:space:]]*//p' "$file" | head -1)"
-		warn="$(sed -n 's/^# Warn:[[:space:]]*//p' "$file" | head -1)"
+		description=$(awk '/^#desc:/{sub(/^#desc:/, ""); print; exit}' "$file")
+		warn=0
+
+		grep -q '^#warn' "$file" && warn=1
 
 		[ -n "$description" ] || description="$(basename "$file")"
-		[ -n "$warn" ] || warn="0"
 
 		json_add_object
 		json_add_string "file" "$(basename "$file")"
 		json_add_string "description" "$description"
-		json_add_string "warn" "$warn"
+		json_add_int "warn" "$warn"
 		json_close_object
 	done
 
@@ -242,6 +336,7 @@ case "$1" in
 		json_init
 
 		json_add_object "activity"
+		json_add_string "section" ""
 		json_close_object
 
 		json_add_object "scripts"
@@ -255,34 +350,35 @@ case "$1" in
 
 	call)
 		case "$2" in
-
-			status)
-				show_status
-				;;
-
 			activity)
-				read -r input
-				json_load "$input" 2>/dev/null
-				json_get_var section section
-				show_activity "$section"
+				show_activity
 				;;
 
 			scripts)
 				show_scripts
 				;;
 
+			status)
+				config_load apcontroller
+
+				json_init
+				json_add_array "hosts"
+
+				config_foreach show_data_from_host host
+
+				json_close_array
+				json_dump
+				;;
+
 			*)
-				echo "Method not found" >&2
 				exit 1
 				;;
 		esac
 		;;
 
 	*)
-		echo "Invalid request" >&2
 		exit 1
 		;;
-
 esac
 
 exit 0
