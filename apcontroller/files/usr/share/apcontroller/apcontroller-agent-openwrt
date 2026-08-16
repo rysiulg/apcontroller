@@ -1265,8 +1265,7 @@ collect_client()
 		printf '"rx_rate":%s,' "$(jnum "$rx_rate")"
 		printf '"tx_rate":%s,' "$(jnum "$tx_rate")"
 
-		printf '"connected":true,'
-		printf '"connected_time":%s,' "$(jnum "$connected_time")"
+		printf '"connected":%s,' "$(jnum "$connected_time")"
 
 		printf '"auth":true,'
 		printf '"assoc":true,'
