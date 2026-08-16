@@ -216,6 +216,10 @@ clients_for_radio()
                 tx=getnum($0, "tx_bytes")
         }
 
+        inclient && /"uptime"[[:space:]]*:/ {
+                connected=getnum($0, "uptime")
+        }
+
         inclient && /"signal"[[:space:]]*:/ {
                 signal=getnum($0, "signal")
         }
