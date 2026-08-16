@@ -1,18 +1,26 @@
 #!/bin/sh
 
 #
-# apcontroller rpcd backend
+# APController rpcd backend
 #
 # Universal remote AP discovery / polling layer.
 #
-# rpcd plugin protocol:
+# Authentication:
+#
+#   1. Try APController SSH key
+#   2. If key fails, try configured password
+#   3. If password succeeds, install APController public key
+#   4. Future SSH/SCP uses the key automatically
+#   5. Password remains fallback
+#
+# rpcd:
 #
 #   apcontroller list
 #   apcontroller call status
+#   apcontroller call poll
 #   apcontroller call activity
 #   apcontroller call scripts
-#
-# RPC arguments are supplied through stdin as JSON.
+#   apcontroller call discover
 #
 
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
@@ -25,6 +33,156 @@ T="$(uci -q get apcontroller.@global[0].path)"
 [ -n "$T" ] && BASEPATH="$T"
 
 mkdir -p "$BASEPATH"
+
+
+#
+# ---------------------------------------------------------------------------
+# SSH KEY CONFIGURATION
+# ---------------------------------------------------------------------------
+#
+
+SSH_DIR="/etc/apcontroller/ssh"
+SSH_KEY="$SSH_DIR/id_apcontroller"
+SSH_PUB="$SSH_KEY.pub"
+
+#
+# Global fallback key can still be configured per host.
+#
+DEFAULT_KEYFILE="$SSH_KEY"
+
+
+ensure_ssh_key()
+{
+	mkdir -p "$SSH_DIR"
+	chmod 700 "$SSH_DIR"
+
+	#
+	# Existing key is fine.
+	#
+	if [ -s "$SSH_KEY" ] && [ -s "$SSH_PUB" ]; then
+		chmod 600 "$SSH_KEY"
+		chmod 644 "$SSH_PUB"
+		return 0
+	fi
+
+	#
+	# Remove incomplete key pair.
+	#
+	rm -f "$SSH_KEY" "$SSH_PUB"
+
+	#
+	# Prefer OpenSSH ssh-keygen.
+	#
+	if command -v ssh-keygen >/dev/null 2>&1; then
+
+		ssh-keygen \
+			-q \
+			-t ed25519 \
+			-N "" \
+			-f "$SSH_KEY" \
+			>/dev/null 2>&1
+
+		if [ -s "$SSH_KEY" ] && [ -s "$SSH_PUB" ]; then
+			chmod 600 "$SSH_KEY"
+			chmod 644 "$SSH_PUB"
+			return 0
+		fi
+	fi
+
+	#
+	# Fallback for OpenWrt/Dropbear installations.
+	#
+	if command -v dropbearkey >/dev/null 2>&1; then
+
+		dropbearkey \
+			-t ed25519 \
+			-f "$SSH_KEY" \
+			>/dev/null 2>&1
+
+		if [ -s "$SSH_KEY" ]; then
+
+			dropbearkey \
+				-y \
+				-f "$SSH_KEY" 2>/dev/null |
+				sed -n 's/^\(ssh-[^ ]*\) .*/\1/p' |
+				head -n 1 |
+				awk '{print}' > "$SSH_PUB"
+
+			#
+			# Above can fail depending on Dropbear version.
+			# Try extracting the complete public key line.
+			#
+			if [ ! -s "$SSH_PUB" ]; then
+				dropbearkey -y -f "$SSH_KEY" 2>/dev/null |
+					grep '^ssh-' |
+					head -n 1 > "$SSH_PUB"
+			fi
+
+			if [ -s "$SSH_KEY" ] && [ -s "$SSH_PUB" ]; then
+				chmod 600 "$SSH_KEY"
+				chmod 644 "$SSH_PUB"
+				return 0
+			fi
+		fi
+	fi
+
+	return 1
+}
+
+
+get_keyfile()
+{
+	local configured="$1"
+
+	if [ -n "$configured" ] &&
+	   [ -f "$configured" ]; then
+		printf '%s' "$configured"
+		return 0
+	fi
+
+	if [ -f "$SSH_KEY" ]; then
+		printf '%s' "$SSH_KEY"
+		return 0
+	fi
+
+	printf '%s' "$DEFAULT_KEYFILE"
+}
+
+
+get_pubkey()
+{
+	local keyfile="$1"
+	local pubfile="${keyfile}.pub"
+	local pubkey
+
+	if [ -s "$pubfile" ]; then
+		cat "$pubfile"
+		return 0
+	fi
+
+	if command -v ssh-keygen >/dev/null 2>&1 &&
+	   [ -s "$keyfile" ]; then
+
+		pubkey="$(ssh-keygen -y -f "$keyfile" 2>/dev/null)"
+
+		if [ -n "$pubkey" ]; then
+			printf '%s\n' "$pubkey"
+			return 0
+		fi
+	fi
+
+	if command -v dropbearkey >/dev/null 2>&1 &&
+	   [ -s "$keyfile" ]; then
+
+		dropbearkey -y -f "$keyfile" 2>/dev/null |
+			grep '^ssh-' |
+			head -n 1
+
+		return 0
+	fi
+
+	return 1
+}
 
 
 #
@@ -91,16 +249,20 @@ EOF
 
 #
 # ---------------------------------------------------------------------------
-# SSH
+# SSH OPTIONS
 # ---------------------------------------------------------------------------
 #
 
-SSHOPTIONS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=5"
+SSHOPTIONS="
+	-o StrictHostKeyChecking=accept-new
+	-o ConnectTimeout=5
+"
 
 DETECT_SSHOPTIONS="$SSHOPTIONS \
 	-o HostKeyAlgorithms=+ssh-rsa \
 	-o PubkeyAcceptedAlgorithms=+ssh-rsa \
-	-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1"
+	-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1
+"
 
 
 get_ssh_options()
@@ -122,6 +284,181 @@ get_ssh_options()
 }
 
 
+#
+# ---------------------------------------------------------------------------
+# LOW LEVEL SSH
+# ---------------------------------------------------------------------------
+#
+
+ssh_with_key()
+{
+	local platform="$1"
+	local ipaddr="$2"
+	local port="$3"
+	local username="$4"
+	local keyfile="$5"
+
+	[ -s "$keyfile" ] || return 1
+
+	local OPTIONS
+	OPTIONS="$(get_ssh_options "$platform")"
+
+	ssh -q \
+		-i "$keyfile" \
+		$OPTIONS \
+		-p "$port" \
+		-o PreferredAuthentications=publickey \
+		-o PasswordAuthentication=no \
+		-o KbdInteractiveAuthentication=no \
+		"$username@$ipaddr" \
+		"$@" 2>/dev/null
+}
+
+
+ssh_with_password()
+{
+	local platform="$1"
+	local ipaddr="$2"
+	local port="$3"
+	local username="$4"
+	local password="$5"
+
+	local OPTIONS
+	OPTIONS="$(get_ssh_options "$platform")"
+
+	sshpass -p "$password" \
+		ssh -q \
+		$OPTIONS \
+		-p "$port" \
+		-o PreferredAuthentications=password \
+		-o PubkeyAuthentication=no \
+		"$username@$ipaddr" \
+		"$@" 2>/dev/null
+}
+
+
+#
+# ---------------------------------------------------------------------------
+# AUTHENTICATION / KEY BOOTSTRAP
+# ---------------------------------------------------------------------------
+#
+
+install_remote_key()
+{
+	local platform="$1"
+	local ipaddr="$2"
+	local port="$3"
+	local username="$4"
+	local password="$5"
+	local keyfile="$6"
+
+	local pubkey
+	local qpub
+
+	pubkey="$(get_pubkey "$keyfile")"
+
+	[ -n "$pubkey" ] || return 1
+
+	#
+	# Quote public key for remote shell.
+	#
+	qpub="$(printf '%s' "$pubkey" |
+		sed "s/'/'\\\\''/g")"
+
+	#
+	# Login with password and install the key.
+	#
+	ssh_with_password \
+		"$platform" \
+		"$ipaddr" \
+		"$port" \
+		"$username" \
+		"$password" \
+		"umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -qxF '$qpub' ~/.ssh/authorized_keys 2>/dev/null || printf '%s\n' '$qpub' >> ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys"
+
+	return $?
+}
+
+
+#
+# Authenticate in the following order:
+#
+#   KEY
+#   PASSWORD
+#   INSTALL KEY
+#   KEY AGAIN
+#
+authenticate()
+{
+	local platform="$1"
+	local ipaddr="$2"
+	local port="$3"
+	local username="$4"
+	local password="$5"
+	local keyfile="$6"
+
+	local command="$7"
+
+	#
+	# 1. Existing key.
+	#
+	if [ -s "$keyfile" ]; then
+
+		ssh_with_key \
+			"$platform" \
+			"$ipaddr" \
+			"$port" \
+			"$username" \
+			"$keyfile" \
+			"$command"
+
+		if [ "$?" -eq 0 ]; then
+			return 0
+		fi
+	fi
+
+	#
+	# 2. Password fallback.
+	#
+	if [ -n "$password" ]; then
+
+		ssh_with_password \
+			"$platform" \
+			"$ipaddr" \
+			"$port" \
+			"$username" \
+			"$password" \
+			"$command"
+
+		if [ "$?" -eq 0 ]; then
+
+			#
+			# Password worked.
+			# Bootstrap the key for future logins.
+			#
+			install_remote_key \
+				"$platform" \
+				"$ipaddr" \
+				"$port" \
+				"$username" \
+				"$password" \
+				"$keyfile" \
+				>/dev/null 2>&1
+
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
+
+#
+# ---------------------------------------------------------------------------
+# PUBLIC REMOTE SSH
+# ---------------------------------------------------------------------------
+#
+
 remote_ssh()
 {
 	local platform="$1"
@@ -130,28 +467,76 @@ remote_ssh()
 	local username="$4"
 	local password="$5"
 	local keyfile="$6"
-	local usekeyfile="$7"
 
-	shift 7
+	shift 6
+
+	authenticate \
+		"$platform" \
+		"$ipaddr" \
+		"$port" \
+		"$username" \
+		"$password" \
+		"$keyfile" \
+		"$@"
+}
+
+
+#
+# ---------------------------------------------------------------------------
+# SCP
+# ---------------------------------------------------------------------------
+#
+
+scp_with_key()
+{
+	local platform="$1"
+	local ipaddr="$2"
+	local port="$3"
+	local username="$4"
+	local keyfile="$5"
+	local source="$6"
+	local destination="$7"
+
+	[ -s "$keyfile" ] || return 1
 
 	local OPTIONS
 	OPTIONS="$(get_ssh_options "$platform")"
 
-	if [ "$usekeyfile" = "1" ] && [ -e "$keyfile" ]; then
-		ssh -q \
-			-i "$keyfile" \
-			$OPTIONS \
-			-p "$port" \
-			"$username@$ipaddr" \
-			"$@" 2>/dev/null
-	else
-		sshpass -p "$password" \
-			ssh -q \
-			$OPTIONS \
-			-p "$port" \
-			"$username@$ipaddr" \
-			"$@" 2>/dev/null
-	fi
+	scp -O \
+		-i "$keyfile" \
+		$OPTIONS \
+		-P "$port" \
+		-o PreferredAuthentications=publickey \
+		-o PasswordAuthentication=no \
+		-o KbdInteractiveAuthentication=no \
+		"$source" \
+		"$username@$ipaddr:$destination" \
+		2>/dev/null
+}
+
+
+scp_with_password()
+{
+	local platform="$1"
+	local ipaddr="$2"
+	local port="$3"
+	local username="$4"
+	local password="$5"
+	local source="$6"
+	local destination="$7"
+
+	local OPTIONS
+	OPTIONS="$(get_ssh_options "$platform")"
+
+	sshpass -p "$password" \
+		scp -O \
+		$OPTIONS \
+		-P "$port" \
+		-o PreferredAuthentications=password \
+		-o PubkeyAuthentication=no \
+		"$source" \
+		"$username@$ipaddr:$destination" \
+		2>/dev/null
 }
 
 
@@ -163,30 +548,62 @@ remote_scp()
 	local username="$4"
 	local password="$5"
 	local keyfile="$6"
-	local usekeyfile="$7"
-	local source="$8"
-	local destination="$9"
+	local source="$7"
+	local destination="$8"
 
-	local OPTIONS
-	OPTIONS="$(get_ssh_options "$platform")"
+	#
+	# 1. Try key first.
+	#
+	if [ -s "$keyfile" ]; then
 
-	if [ "$usekeyfile" = "1" ] && [ -e "$keyfile" ]; then
-		scp -O \
-			-i "$keyfile" \
-			$OPTIONS \
-			-P "$port" \
+		scp_with_key \
+			"$platform" \
+			"$ipaddr" \
+			"$port" \
+			"$username" \
+			"$keyfile" \
 			"$source" \
-			"$username@$ipaddr:$destination" \
-			2>/dev/null
-	else
-		sshpass -p "$password" \
-			scp -O \
-			$OPTIONS \
-			-P "$port" \
-			"$source" \
-			"$username@$ipaddr:$destination" \
-			2>/dev/null
+			"$destination"
+
+		if [ "$?" -eq 0 ]; then
+			return 0
+		fi
 	fi
+
+	#
+	# 2. Password fallback.
+	#
+	if [ -n "$password" ]; then
+
+		scp_with_password \
+			"$platform" \
+			"$ipaddr" \
+			"$port" \
+			"$username" \
+			"$password" \
+			"$source" \
+			"$destination"
+
+		if [ "$?" -eq 0 ]; then
+
+			#
+			# Password SCP worked.
+			# Install key immediately.
+			#
+			install_remote_key \
+				"$platform" \
+				"$ipaddr" \
+				"$port" \
+				"$username" \
+				"$password" \
+				"$keyfile" \
+				>/dev/null 2>&1
+
+			return 0
+		fi
+	fi
+
+	return 1
 }
 
 
@@ -203,124 +620,155 @@ detect_platform()
 	local username="$3"
 	local password="$4"
 	local keyfile="$5"
-	local usekeyfile="$6"
 
 	local OUT
-	local OPTIONS
 
 	#
-	# Discovery must itself be vendor-neutral.
-	# Allow legacy SSH algorithms because old Ubiquiti APs
-	# commonly expose only ssh-rsa/ssh-dss.
+	# Key first.
 	#
-  OPTIONS="$DETECT_SSHOPTIONS \
-  	-o HostKeyAlgorithms=+ssh-rsa \
-  	-o PubkeyAcceptedAlgorithms=+ssh-rsa \
-  	-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1"
+	if [ -s "$keyfile" ]; then
 
-	if [ "$usekeyfile" = "1" ] && [ -e "$keyfile" ]; then
+		OUT="$(
+			ssh_with_key \
+				"generic" \
+				"$ipaddr" \
+				"$port" \
+				"$username" \
+				"$keyfile" \
+				'
+					echo "---APCONTROLLER---"
 
-OUT="$(sshpass -p "$password" \
-	ssh -q \
-	$OPTIONS \
-	-p "$port" \
-	"$username@$ipaddr" '
-		echo "---APCONTROLLER---"
+					if command -v mca-cli >/dev/null 2>&1 ||
+					   command -v mca-cli-op >/dev/null 2>&1 ||
+					   command -v ubntbox >/dev/null 2>&1 ||
+					   command -v cfgmtd >/dev/null 2>&1 ||
+					   command -v syswrapper.sh >/dev/null 2>&1 ||
+					   command -v ubnt-util >/dev/null 2>&1 ||
+					   [ -f /etc/ubnt_version ] ||
+					   [ -f /etc/ubnt_version.info ] ||
+					   [ -d /etc/ubnt ] ||
+					   [ -d /etc/ubnt.d ] ||
+					   { [ -f /etc/version ] &&
+					     grep -qi "ubiquiti\|ubnt" /etc/version 2>/dev/null; }
+					then
+						echo UBIQUITI
+					fi
 
-		if command -v mca-cli >/dev/null 2>&1 ||
-		   command -v mca-cli-op >/dev/null 2>&1 ||
-		   command -v ubntbox >/dev/null 2>&1 ||
-		   command -v cfgmtd >/dev/null 2>&1 ||
-		   command -v syswrapper.sh >/dev/null 2>&1 ||
-		   command -v ubnt-util >/dev/null 2>&1 ||
-		   [ -f /etc/ubnt_version ] ||
-		   [ -f /etc/ubnt_version.info ] ||
-		   [ -d /etc/ubnt ] ||
-		   [ -d /etc/ubnt.d ] ||
-		   { [ -f /etc/version ] && grep -qi "ubiquiti\|ubnt" /etc/version 2>/dev/null; }
-		then
-			echo UBIQUITI
+					if [ -f /etc/openwrt_release ] ||
+					   [ -f /etc/openwrt_version ] ||
+					   { [ -f /etc/os-release ] &&
+					     grep -qi "^[[:space:]]*ID=[\"'\"']*openwrt" /etc/os-release 2>/dev/null; } ||
+					   command -v ubus >/dev/null 2>&1 ||
+					   command -v uci >/dev/null 2>&1
+					then
+						echo OPENWRT
+					fi
+
+					if command -v cliclientd >/dev/null 2>&1 ||
+					   command -v tpctl >/dev/null 2>&1 ||
+					   [ -d /etc/omada ] ||
+					   [ -d /etc/tplink ] ||
+					   [ -d /etc/tp-link ]
+					then
+						echo OMADA
+					fi
+
+					if command -v hostapd >/dev/null 2>&1 ||
+					   [ -d /etc/hostapd ] ||
+					   [ -d /sys/class/net ]
+					then
+						echo GENERIC
+					fi
+				' 2>/dev/null
+		)"
+
+		#
+		# If key worked, use result.
+		#
+		if printf '%s' "$OUT" | grep -q "APCONTROLLER"; then
+			:
+		else
+			OUT=""
 		fi
-
-		if [ -f /etc/openwrt_release ] ||
-		   [ -f /etc/openwrt_version ] ||
-		   { [ -f /etc/os-release ] && grep -qi "^[[:space:]]*ID=[\"'\"']*openwrt" /etc/os-release 2>/dev/null; } ||
-		   command -v ubus >/dev/null 2>&1 ||
-		   command -v uci >/dev/null 2>&1
-		then
-			echo OPENWRT
-		fi
-
-		if command -v cliclientd >/dev/null 2>&1 ||
-		   command -v tpctl >/dev/null 2>&1 ||
-		   [ -d /etc/omada ] ||
-		   [ -d /etc/tplink ] ||
-		   [ -d /etc/tp-link ]
-		then
-			echo OMADA
-		fi
-
-		if command -v hostapd >/dev/null 2>&1 ||
-		   [ -d /etc/hostapd ] ||
-		   [ -d /sys/class/net ]
-		then
-			echo GENERIC
-		fi
-	' 2>/dev/null)"
-
-	else
-
-		OUT="$(sshpass -p "$password" \
-			ssh -q \
-			$OPTIONS \
-			-p "$port" \
-			"$username@$ipaddr" '
-				echo "---APCONTROLLER---"
-
-				if command -v mca-cli >/dev/null 2>&1 ||
-				   command -v mca-cli-op >/dev/null 2>&1 ||
-				   command -v ubntbox >/dev/null 2>&1 ||
-				   command -v cfgmtd >/dev/null 2>&1 ||
-				   command -v syswrapper.sh >/dev/null 2>&1 ||
-				   command -v ubnt-util >/dev/null 2>&1 ||
-				   [ -f /etc/ubnt_version ] ||
-				   [ -f /etc/ubnt_version.info ] ||
-				   [ -d /etc/ubnt ] ||
-				   [ -d /etc/ubnt.d ] ||
-				   { [ -f /etc/version ] && grep -qi "ubiquiti\|ubnt" /etc/version 2>/dev/null; }
-				then
-					echo UBIQUITI
-				fi
-
-				if [ -f /etc/openwrt_release ] ||
-				   [ -f /etc/openwrt_version ] ||
-				   { [ -f /etc/os-release ] && grep -qi "^[[:space:]]*ID=[\"'\"']*openwrt" /etc/os-release 2>/dev/null; } ||
-				   command -v ubus >/dev/null 2>&1 ||
-				   command -v uci >/dev/null 2>&1
-				then
-					echo OPENWRT
-				fi
-
-				if command -v cliclientd >/dev/null 2>&1 ||
-				   command -v tpctl >/dev/null 2>&1 ||
-				   [ -d /etc/omada ] ||
-				   [ -d /etc/tplink ] ||
-				   [ -d /etc/tp-link ]
-				then
-					echo OMADA
-				fi
-
-				if command -v hostapd >/dev/null 2>&1 ||
-				   [ -d /etc/hostapd ] ||
-				   [ -d /sys/class/net ]
-				then
-					echo GENERIC
-				fi
-			' 2>/dev/null)"
 	fi
 
 	#
-	# Specific vendor wins over generic OpenWrt/hostapd indicators.
+	# Password fallback.
+	#
+	if [ -z "$OUT" ] && [ -n "$password" ]; then
+
+		OUT="$(
+			ssh_with_password \
+				"generic" \
+				"$ipaddr" \
+				"$port" \
+				"$username" \
+				"$password" \
+				'
+					echo "---APCONTROLLER---"
+
+					if command -v mca-cli >/dev/null 2>&1 ||
+					   command -v mca-cli-op >/dev/null 2>&1 ||
+					   command -v ubntbox >/dev/null 2>&1 ||
+					   command -v cfgmtd >/dev/null 2>&1 ||
+					   command -v syswrapper.sh >/dev/null 2>&1 ||
+					   command -v ubnt-util >/dev/null 2>&1 ||
+					   [ -f /etc/ubnt_version ] ||
+					   [ -f /etc/ubnt_version.info ] ||
+					   [ -d /etc/ubnt ] ||
+					   [ -d /etc/ubnt.d ] ||
+					   { [ -f /etc/version ] &&
+					     grep -qi "ubiquiti\|ubnt" /etc/version 2>/dev/null; }
+					then
+						echo UBIQUITI
+					fi
+
+					if [ -f /etc/openwrt_release ] ||
+					   [ -f /etc/openwrt_version ] ||
+					   { [ -f /etc/os-release ] &&
+					     grep -qi "^[[:space:]]*ID=[\"'\"']*openwrt" /etc/os-release 2>/dev/null; } ||
+					   command -v ubus >/dev/null 2>&1 ||
+					   command -v uci >/dev/null 2>&1
+					then
+						echo OPENWRT
+					fi
+
+					if command -v cliclientd >/dev/null 2>&1 ||
+					   command -v tpctl >/dev/null 2>&1 ||
+					   [ -d /etc/omada ] ||
+					   [ -d /etc/tplink ] ||
+					   [ -d /etc/tp-link ]
+					then
+						echo OMADA
+					fi
+
+					if command -v hostapd >/dev/null 2>&1 ||
+					   [ -d /etc/hostapd ] ||
+					   [ -d /sys/class/net ]
+					then
+						echo GENERIC
+					fi
+				' 2>/dev/null
+		)"
+
+		#
+		# Password was valid, therefore install the key.
+		#
+		if printf '%s' "$OUT" | grep -q "APCONTROLLER"; then
+
+			install_remote_key \
+				"generic" \
+				"$ipaddr" \
+				"$port" \
+				"$username" \
+				"$password" \
+				"$keyfile" \
+				>/dev/null 2>&1
+		fi
+	fi
+
+	#
+	# Specific vendor wins over generic indicators.
 	#
 	case "$OUT" in
 		*UBIQUITI*)
@@ -344,6 +792,7 @@ OUT="$(sshpass -p "$password" \
 			;;
 	esac
 }
+
 
 #
 # ---------------------------------------------------------------------------
@@ -385,9 +834,6 @@ get_agent()
 			;;
 	esac
 
-	#
-	# Universal agent is ALWAYS the final fallback.
-	#
 	if [ -x /usr/share/apcontroller/apcontroller-agent ]; then
 		echo /usr/share/apcontroller/apcontroller-agent
 		return 0
@@ -412,22 +858,35 @@ normalize_agent_output()
 	   printf '%s' "$input" |
 	   jsonfilter -q -e '@' >/dev/null 2>&1; then
 
-		#
-		# Make sure the top-level object contains the arrays LuCI expects.
-		#
 		local clients2g clients5g clients6g
 
-		clients2g="$(printf '%s' "$input" | jsonfilter -q -e '@.clientslist2g')"
-		clients5g="$(printf '%s' "$input" | jsonfilter -q -e '@.clientslist5g')"
-		clients6g="$(printf '%s' "$input" | jsonfilter -q -e '@.clientslist6g')"
+		clients2g="$(printf '%s' "$input" |
+			jsonfilter -q -e '@.clientslist2g')"
+
+		clients5g="$(printf '%s' "$input" |
+			jsonfilter -q -e '@.clientslist5g')"
+
+		clients6g="$(printf '%s' "$input" |
+			jsonfilter -q -e '@.clientslist6g')"
 
 		[ -n "$clients2g" ] || clients2g="[]"
 		[ -n "$clients5g" ] || clients5g="[]"
 		[ -n "$clients6g" ] || clients6g="[]"
 
-		printf '%s' "$input" |
-			sed 's/}[[:space:]]*$//' |
-			sed "s/\$/,\"clientslist2g\":${clients2g},\"clientslist5g\":${clients5g},\"clientslist6g\":${clients6g}}/" 2>/dev/null
+		#
+		# Do not duplicate existing arrays.
+		#
+		if printf '%s' "$input" |
+			jsonfilter -q -e '@.clientslist2g' >/dev/null 2>&1; then
+
+			printf '%s' "$input"
+
+		else
+
+			printf '%s' "$input" |
+				sed 's/}[[:space:]]*$//' |
+				sed "s/\$/,\"clientslist2g\":${clients2g},\"clientslist5g\":${clients5g},\"clientslist6g\":${clients6g}}/"
+		fi
 
 		return 0
 	fi
@@ -451,7 +910,6 @@ get_data_from_host()
 	local username
 	local password
 	local port
-	local usekeyfile
 	local keyfile
 	local platform
 	local configured_platform
@@ -477,10 +935,24 @@ get_data_from_host()
 	config_get password "$cfg" password
 	config_get port "$cfg" port 22
 
-	config_get usekeyfile "$cfg" usekeyfile 0
-	config_get keyfile "$cfg" keyfile "/root/.ssh/id_dropbear"
+	config_get keyfile "$cfg" keyfile "$DEFAULT_KEYFILE"
+
+	#
+	# If configured key does not exist, use APController default key.
+	#
+	keyfile="$(get_keyfile "$keyfile")"
 
 	config_get configured_platform "$cfg" platform ""
+
+	#
+	# Make sure our controller key exists.
+	#
+	ensure_ssh_key >/dev/null 2>&1
+
+	#
+	# Re-evaluate key after generation.
+	#
+	keyfile="$(get_keyfile "$keyfile")"
 
 	#
 	# Automatic discovery first.
@@ -490,14 +962,12 @@ get_data_from_host()
 		"$port" \
 		"$username" \
 		"$password" \
-		"$keyfile" \
-		"$usekeyfile")"
+		"$keyfile")"
 
 	[ -n "$platform" ] || platform="unknown"
 
 	#
-	# Explicit UCI platform is an override, not a replacement
-	# for autodiscovery.
+	# Explicit UCI platform is an override.
 	#
 	if [ -n "$configured_platform" ] &&
 	   [ "$configured_platform" != "auto" ]; then
@@ -526,7 +996,6 @@ get_data_from_host()
 			"$username" \
 			"$password" \
 			"$keyfile" \
-			"$usekeyfile" \
 			"$agent" \
 			"/tmp/apcontroller-agent"; then
 
@@ -537,7 +1006,6 @@ get_data_from_host()
 				"$username" \
 				"$password" \
 				"$keyfile" \
-				"$usekeyfile" \
 				"chmod +x /tmp/apcontroller-agent; /tmp/apcontroller-agent" \
 				> "$tmpoutput"
 
@@ -550,7 +1018,6 @@ get_data_from_host()
 				"$username" \
 				"$password" \
 				"$keyfile" \
-				"$usekeyfile" \
 				"rm -f /tmp/apcontroller-agent" \
 				>/dev/null 2>&1
 
@@ -570,7 +1037,7 @@ get_data_from_host()
 	fi
 
 	#
-	# Always keep a valid cache object.
+	# Always keep valid cache.
 	#
 	if [ ! -s "$output" ]; then
 		empty_host_json > "$output"
@@ -593,7 +1060,7 @@ get_data_from_host()
 
 		d=$((now - timestamp))
 
-		[ "$d" -le 60 ] && val=1
+		[ "$d" -le 180 ] && val=1
 	fi
 
 	#
@@ -633,7 +1100,7 @@ host_json()
 
 #
 # ---------------------------------------------------------------------------
-# Build hosts array
+# Build one host
 # ---------------------------------------------------------------------------
 #
 
@@ -656,6 +1123,7 @@ build_one_host()
 	local hostname
 	local model
 	local software
+	local vendor
 	local uptime
 	local load
 
@@ -680,9 +1148,6 @@ build_one_host()
 
 	[ -n "$data" ] || data="$(empty_host_json)"
 
-	#
-	# Last contact
-	#
 	lastcontact=-1
 	cache="${BASEPATH}/${ipaddr}-${cfg}"
 
@@ -701,62 +1166,141 @@ build_one_host()
 		esac
 	fi
 
-	#
-	# Scalar fields.
-	#
-	mac="$(printf '%s' "$data" | jsonfilter -q -e '@.mac' 2>/dev/null)"
-	hostname="$(printf '%s' "$data" | jsonfilter -q -e '@.hostname' 2>/dev/null)"
-	model="$(printf '%s' "$data" | jsonfilter -q -e '@.model' 2>/dev/null)"
-	software="$(printf '%s' "$data" | jsonfilter -q -e '@.software' 2>/dev/null)"
-	uptime="$(printf '%s' "$data" | jsonfilter -q -e '@.uptime' 2>/dev/null)"
-	load="$(printf '%s' "$data" | jsonfilter -q -e '@.load' 2>/dev/null)"
+	mac="$(printf '%s' "$data" |
+		jsonfilter -q -e '@.mac' 2>/dev/null)"
 
-	channels2g="$(printf '%s' "$data" | jsonfilter -q -e '@.channels2g' 2>/dev/null)"
-	channels5g="$(printf '%s' "$data" | jsonfilter -q -e '@.channels5g' 2>/dev/null)"
-	channels6g="$(printf '%s' "$data" | jsonfilter -q -e '@.channels6g' 2>/dev/null)"
+	hostname="$(printf '%s' "$data" |
+		jsonfilter -q -e '@.hostname' 2>/dev/null)"
+
+	model="$(printf '%s' "$data" |
+		jsonfilter -q -e '@.model' 2>/dev/null)"
+
+	software="$(printf '%s' "$data" |
+		jsonfilter -q -e '@.software' 2>/dev/null)"
 
 	#
-	# Client arrays.
+	# Human-readable vendor.
 	#
-	clients2g="$(printf '%s' "$data" | jsonfilter -q -e '@.clientslist2g' 2>/dev/null)"
-	clients5g="$(printf '%s' "$data" | jsonfilter -q -e '@.clientslist5g' 2>/dev/null)"
-	clients6g="$(printf '%s' "$data" | jsonfilter -q -e '@.clientslist6g' 2>/dev/null)"
+	vendor=""
+
+	case "$model $software" in
+		*Ubiquiti*|*UBNT*|*UniFi*)
+			vendor="Ubiquiti"
+			;;
+		*TP-Link*|*TP_LINK*|*Archer*|*TL-WDR*)
+			vendor="TP-Link"
+			;;
+		*Omada*)
+			vendor="TP-Link"
+			;;
+		*)
+			case "$platform" in
+				ubiquiti)
+					vendor="Ubiquiti"
+					;;
+				omada)
+					vendor="TP-Link"
+					;;
+				openwrt)
+					vendor="OpenWrt"
+					;;
+				generic)
+					vendor="Generic"
+					;;
+				*)
+					vendor=""
+					;;
+			esac
+			;;
+	esac
+
+	if [ -n "$vendor" ] && [ -n "$software" ]; then
+		software="$vendor / $software"
+	fi
+
+	uptime="$(printf '%s' "$data" |
+		jsonfilter -q -e '@.uptime' 2>/dev/null)"
+
+	load="$(printf '%s' "$data" |
+		jsonfilter -q -e '@.load' 2>/dev/null)"
+
+	channels2g="$(printf '%s' "$data" |
+		jsonfilter -q -e '@.channels2g' 2>/dev/null)"
+
+	channels5g="$(printf '%s' "$data" |
+		jsonfilter -q -e '@.channels5g' 2>/dev/null)"
+
+	channels6g="$(printf '%s' "$data" |
+		jsonfilter -q -e '@.channels6g' 2>/dev/null)"
+
+	clients2g="$(printf '%s' "$data" |
+		jsonfilter -q -e '@.clientslist2g' 2>/dev/null)"
+
+	clients5g="$(printf '%s' "$data" |
+		jsonfilter -q -e '@.clientslist5g' 2>/dev/null)"
+
+	clients6g="$(printf '%s' "$data" |
+		jsonfilter -q -e '@.clientslist6g' 2>/dev/null)"
 
 	[ -n "$clients2g" ] || clients2g='[]'
 	[ -n "$clients5g" ] || clients5g='[]'
 	[ -n "$clients6g" ] || clients6g='[]'
 
-	#
-	# Never allow an undefined/non-numeric uptime.
-	#
 	case "$uptime" in
 		''|*[!0-9-]*)
 			uptime=0
 			;;
 	esac
 
-	#
-	# Build ONE guaranteed JSON object.
-	#
 	printf '{'
-	printf '"section":%s,' "$(json_string "$cfg")"
-	printf '"name":%s,' "$(json_string "$name")"
-	printf '"ipaddr":%s,' "$(json_string "$ipaddr")"
-	printf '"platform":%s,' "$(json_string "$platform")"
-	printf '"enabled":%s,' "$(json_number "$enabled")"
 
-	printf '"mac":%s,' "$(json_string "$mac")"
-	printf '"hostname":%s,' "$(json_string "$hostname")"
-	printf '"model":%s,' "$(json_string "$model")"
-	printf '"software":%s,' "$(json_string "$software")"
-	printf '"uptime":%s,' "$(json_number "$uptime")"
-	printf '"load":%s,' "$(json_string "$load")"
+	printf '"section":%s,' \
+		"$(json_string "$cfg")"
 
-	printf '"lastcontact":%s,' "$(json_number "$lastcontact")"
+	printf '"name":%s,' \
+		"$(json_string "$name")"
 
-	printf '"channels2g":%s,' "$(json_string "$channels2g")"
-	printf '"channels5g":%s,' "$(json_string "$channels5g")"
-	printf '"channels6g":%s,' "$(json_string "$channels6g")"
+	printf '"ipaddr":%s,' \
+		"$(json_string "$ipaddr")"
+
+	printf '"platform":%s,' \
+		"$(json_string "$platform")"
+
+	printf '"vendor":%s,' \
+		"$(json_string "$vendor")"
+
+	printf '"enabled":%s,' \
+		"$(json_number "$enabled")"
+
+	printf '"mac":%s,' \
+		"$(json_string "$mac")"
+
+	printf '"hostname":%s,' \
+		"$(json_string "$hostname")"
+
+	printf '"model":%s,' \
+		"$(json_string "$model")"
+
+	printf '"software":%s,' \
+		"$(json_string "$software")"
+
+	printf '"uptime":%s,' \
+		"$(json_number "$uptime")"
+
+	printf '"load":%s,' \
+		"$(json_string "$load")"
+
+	printf '"lastcontact":%s,' \
+		"$(json_number "$lastcontact")"
+
+	printf '"channels2g":%s,' \
+		"$(json_string "$channels2g")"
+
+	printf '"channels5g":%s,' \
+		"$(json_string "$channels5g")"
+
+	printf '"channels6g":%s,' \
+		"$(json_string "$channels6g")"
 
 	printf '"clientslist2g":%s,' "$clients2g"
 	printf '"clientslist5g":%s,' "$clients5g"
@@ -776,13 +1320,11 @@ build_hosts()
 
 	config_load apcontroller
 
-	for cfg in $(uci -q show apcontroller | sed -n 's/^apcontroller\.\([^=]*\)=host$/\1/p'); do
+	for cfg in $(uci -q show apcontroller |
+		sed -n 's/^apcontroller\.\([^=]*\)=host$/\1/p'); do
 
 		item="$(build_one_host "$cfg" 2>/dev/null)"
 
-		#
-		# Pomijamy wyłącznie faktycznie pusty wynik.
-		#
 		[ -n "$item" ] || continue
 
 		if [ "$first" -eq 0 ]; then
@@ -799,35 +1341,44 @@ build_hosts()
 
 #
 # ---------------------------------------------------------------------------
-# RPC: status
+# RPC status
 # ---------------------------------------------------------------------------
 #
 
 rpc_status()
 {
-        printf '{"hosts":'
-        build_hosts
-        printf '}\n'
+	config_load apcontroller
+
+	printf '{"hosts":'
+	build_hosts
+	printf '}\n'
 }
+
 
 #
 # ---------------------------------------------------------------------------
-# RPC: poll
+# RPC poll
 # ---------------------------------------------------------------------------
 #
 
 rpc_poll()
 {
-        config_load apcontroller
+	config_load apcontroller
 
-        config_foreach get_data_from_host host
+	#
+	# Ensure controller key exists before polling.
+	#
+	ensure_ssh_key >/dev/null 2>&1
 
-        printf '{"ok":true}\n'
+	config_foreach get_data_from_host host
+
+	printf '{"ok":true}\n'
 }
+
 
 #
 # ---------------------------------------------------------------------------
-# RPC: activity
+# RPC activity
 # ---------------------------------------------------------------------------
 #
 
@@ -888,7 +1439,204 @@ rpc_activity()
 
 #
 # ---------------------------------------------------------------------------
-# RPC: scripts
+# RPC discover
+# ---------------------------------------------------------------------------
+#
+
+rpc_discover()
+{
+	local username
+	local password
+	local port
+	local keyfile
+
+	local iface
+	local addr
+	local cidr
+	local ip
+	local base
+	local i
+
+	local platform
+	local first=1
+	local netfirst=1
+
+	config_load apcontroller
+
+	#
+	# Global credentials used for discovery.
+	#
+	config_get username "@global[0]" username ""
+	config_get password "@global[0]" password ""
+	config_get port "@global[0]" port 22
+	config_get keyfile "@global[0]" keyfile "$DEFAULT_KEYFILE"
+
+	[ -n "$keyfile" ] || keyfile="$DEFAULT_KEYFILE"
+
+	#
+	# Ensure local APController key exists.
+	#
+	ensure_ssh_key >/dev/null 2>&1
+
+	keyfile="$(get_keyfile "$keyfile")"
+
+	if [ -z "$username" ]; then
+		printf '{"ok":false,"error":"global discovery username is empty"}\n'
+		return 1
+	fi
+
+	printf '{"ok":true,"networks":['
+
+	for iface in $(ip -o link show |
+		awk -F': ' '{print $2}' |
+		sed 's/@.*//'); do
+
+		case "$iface" in
+			lo)
+				continue
+				;;
+
+			br-lan|lan*|wg*|tun*|tap*|vpn*|tailscale*)
+				;;
+
+			*)
+				continue
+				;;
+		esac
+
+		ip -o -4 addr show dev "$iface" 2>/dev/null |
+		while read -r _ _ _ addr _; do
+
+			cidr="${addr#*/}"
+			ip="${addr%/*}"
+
+			case "$cidr" in
+				1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30)
+					;;
+				*)
+					continue
+					;;
+			esac
+
+			if [ -x /bin/ipcalc.sh ]; then
+
+				base="$(ipcalc.sh "$ip" "$cidr" 2>/dev/null |
+					sed -n 's/^NETWORK=\(.*\)$/\1/p')"
+
+			else
+
+				case "$cidr" in
+					24)
+						base="$(echo "$ip" |
+							awk -F. '{print $1"."$2"."$3".0"}')"
+						;;
+
+					*)
+						base=""
+						;;
+				esac
+			fi
+
+			[ -n "$base" ] || continue
+
+			if [ "$netfirst" -eq 0 ]; then
+				printf ','
+			fi
+
+			printf '%s' "$(json_string "$base/$cidr")"
+
+			netfirst=0
+
+		done
+	done
+
+	printf '],"hosts":['
+
+	first=1
+
+	for iface in $(ip -o link show |
+		awk -F': ' '{print $2}' |
+		sed 's/@.*//'); do
+
+		case "$iface" in
+			lo)
+				continue
+				;;
+
+			br-lan|lan*|wg*|tun*|tap*|vpn*|tailscale*)
+				;;
+
+			*)
+				continue
+				;;
+		esac
+
+		ip -o -4 addr show dev "$iface" 2>/dev/null |
+		while read -r _ _ _ addr _; do
+
+			cidr="${addr#*/}"
+			ip="${addr%/*}"
+
+			case "$cidr" in
+				24)
+
+					base="$(echo "$ip" |
+						awk -F. '{print $1"."$2"."$3".0"}')"
+
+					for i in $(seq 1 254); do
+
+						target="${base%.*}.${i}"
+
+						[ "$target" = "$ip" ] && continue
+
+						if ! nc -z -w 1 "$target" "$port" \
+							>/dev/null 2>&1; then
+							continue
+						fi
+
+						platform="$(detect_platform \
+							"$target" \
+							"$port" \
+							"$username" \
+							"$password" \
+							"$keyfile")"
+
+						case "$platform" in
+							unknown|"")
+								continue
+								;;
+						esac
+
+						if [ "$first" -eq 0 ]; then
+							printf ','
+						fi
+
+						first=0
+
+						printf '{"ipaddr":%s,"platform":%s}' \
+							"$(json_string "$target")" \
+							"$(json_string "$platform")"
+
+					done
+					;;
+
+				*)
+					continue
+					;;
+
+			esac
+
+		done
+
+	done
+
+	printf ']}\n'
+}
+
+
+#
+# ---------------------------------------------------------------------------
+# RPC scripts
 # ---------------------------------------------------------------------------
 #
 
@@ -937,65 +1685,55 @@ rpc_scripts()
 # RPCD METHOD REGISTRATION
 # ---------------------------------------------------------------------------
 #
-# THIS IS CRITICAL.
-#
-# rpcd executes this script with:
-#
-#   $1 = list
-#
-# at startup.
-#
-# For calls:
-#
-#   $1 = call
-#   $2 = method
-#
-# JSON arguments arrive through stdin.
-#
-# ---------------------------------------------------------------------------
-#
 
 case "$1" in
 
-list)
-        cat <<'EOF'
+	list)
+
+		cat <<'EOF'
 {
-        "status": {},
-        "poll": {},
-        "activity": {
-                "section": "string"
-        },
-        "scripts": {}
+	"status": {},
+	"poll": {},
+	"activity": {
+		"section": "string"
+	},
+	"scripts": {},
+	"discover": {}
 }
 EOF
+
 		exit 0
 		;;
 
-call)
+	call)
 
-        case "$2" in
+		case "$2" in
 
-                status)
-                        rpc_status
-                        ;;
+			status)
+				rpc_status
+				;;
 
-                poll)
-                        rpc_poll
-                        ;;
+			poll)
+				rpc_poll
+				;;
 
-                activity)
-                        rpc_activity
-                        ;;
+			activity)
+				rpc_activity
+				;;
 
-                scripts)
-                        rpc_scripts
-                        ;;
+			scripts)
+				rpc_scripts
+				;;
 
-                *)
-                        exit 1
-                        ;;
+			discover)
+				rpc_discover
+				;;
 
-        esac
+			*)
+				exit 1
+				;;
+
+		esac
 
 		exit 0
 		;;
