@@ -174,7 +174,9 @@ return view.extend({
 		};
 
 		function updateDeviceStatus(records) {
-			devicestatus = records;
+			devicestatus = (records && typeof records === 'object') ? records : {};
+			if (!Array.isArray(devicestatus.hosts))
+		        devicestatus.hosts = [];
 			clients.length = 0;
 			(devicestatus.hosts).forEach(row => {
 				const ap = uci.get('apcontroller', row['section'], 'name');
