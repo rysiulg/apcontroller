@@ -15,10 +15,6 @@ VERBOSE="$2"
 . /lib/functions.sh
 . /usr/share/libubox/jshn.sh
 
-
-#
-# Base path
-#
 BASEPATH="/tmp/apcontroller"
 
 T=$(uci -q get apcontroller.@global[0].path)
@@ -28,14 +24,12 @@ mkdir -p "$BASEPATH"
 
 
 #
-# Legacy SSH options.
+# SSH options required for old devices.
 #
-# Used for old Ubiquiti devices which only offer ssh-rsa/ssh-dss.
-#
-LEGACY_SSHOPTIONS="$SSHOPTIONS \
-	-o HostKeyAlgorithms=+ssh-rsa \
-	-o PubkeyAcceptedAlgorithms=+ssh-rsa \
-	-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1"
+LEGACYSSHOPTIONS="$SSHOPTIONS \
+-o HostKeyAlgorithms=+ssh-rsa \
+-o PubkeyAcceptedAlgorithms=+ssh-rsa \
+-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group1-sha1"
 
 
 #
@@ -50,14 +44,12 @@ detect_platform() {
 	local usekeyfile="$6"
 	local OUT
 
-	#
-	# First try normal SSH.
-	#
 	if [ "$usekeyfile" = "1" ] && [ -e "$keyfile" ]; then
 
-		OUT=$(ssh -q \
+		OUT=$(ssh \
+			-q \
 			-i "$keyfile" \
-			$SSHOPTIONS \
+			$LEGACYSSHOPTIONS \
 			-p "$port" \
 			-o ConnectTimeout=5 \
 			"$username@$ipaddr" '
@@ -81,8 +73,9 @@ detect_platform() {
 	else
 
 		OUT=$(sshpass -p "$password" \
-			ssh -q \
-			$SSHOPTIONS \
+			ssh \
+			-q \
+			$LEGACYSSHOPTIONS \
 			-p "$port" \
 			-o ConnectTimeout=5 \
 			"$username@$ipaddr" '
@@ -104,71 +97,6 @@ detect_platform() {
 			' 2>/dev/null)
 
 	fi
-
-
-	#
-	# FIX:
-	# If normal SSH failed, try legacy SSH.
-	#
-	if [ -z "$OUT" ]; then
-
-		if [ "$usekeyfile" = "1" ] && [ -e "$keyfile" ]; then
-
-			OUT=$(ssh -q \
-				-i "$keyfile" \
-				$LEGACY_SSHOPTIONS \
-				-p "$port" \
-				-o ConnectTimeout=5 \
-				"$username@$ipaddr" '
-					if [ -f /etc/openwrt_release ] ||
-					   [ -f /etc/openwrt_version ] ||
-					   command -v ubus >/dev/null 2>&1; then
-						echo OPENWRT
-					elif command -v mca-cli >/dev/null 2>&1 ||
-					     command -v ubntbox >/dev/null 2>&1 ||
-					     [ -f /etc/ubnt_version ]; then
-						echo UBIQUITI
-					elif command -v cliclientd >/dev/null 2>&1 ||
-					     [ -f /etc/ubnt_version ]; then
-						echo UBIQUITI
-					elif command -v cliclientd >/dev/null 2>&1 ||
-					     [ -d /etc/omada ] ||
-					     [ -d /etc/tplink ]; then
-						echo OMADA
-					else
-						echo UNKNOWN
-					fi
-				' 2>/dev/null)
-
-		else
-
-			OUT=$(sshpass -p "$password" \
-				ssh -q \
-				$LEGACY_SSHOPTIONS \
-				-p "$port" \
-				-o ConnectTimeout=5 \
-				"$username@$ipaddr" '
-					if [ -f /etc/openwrt_release ] ||
-					   [ -f /etc/openwrt_version ] ||
-					   command -v ubus >/dev/null 2>&1; then
-						echo OPENWRT
-					elif command -v mca-cli >/dev/null 2>&1 ||
-					     command -v ubntbox >/dev/null 2>&1 ||
-					     [ -f /etc/ubnt_version ]; then
-						echo UBIQUITI
-					elif command -v cliclientd >/dev/null 2>&1 ||
-					     [ -d /etc/omada ] ||
-					     [ -d /etc/tplink ]; then
-						echo OMADA
-					else
-						echo UNKNOWN
-					fi
-				' 2>/dev/null)
-
-		fi
-
-	fi
-
 
 	case "$OUT" in
 		*OPENWRT*)
@@ -196,7 +124,7 @@ get_ssh_options() {
 	case "$platform" in
 
 		ubiquiti)
-			echo "$LEGACY_SSHOPTIONS"
+			echo "$LEGACYSSHOPTIONS"
 			;;
 
 		*)
@@ -208,14 +136,12 @@ get_ssh_options() {
 
 
 #
-# Get previously detected platform.
+# Get cached platform.
 #
 get_platform() {
 	local ipaddr="$1"
 	local host="$2"
-	local platform
-
-	platform=""
+	local platform=""
 
 	if [ -s "${BASEPATH}/${ipaddr}-${host}.platform" ]; then
 		platform=$(cat "${BASEPATH}/${ipaddr}-${host}.platform" 2>/dev/null)
@@ -233,7 +159,7 @@ get_platform() {
 
 
 #
-# Generate JSON commands.
+# Generate JSON.
 #
 T=$(uci -q get apcontroller."$SEC")
 [ "$T" = "group" ] || exit 0
@@ -255,7 +181,6 @@ fi
 
 json_add_array "wifis"
 
-
 for WIFI in $WIFIS; do
 
 	BANDS=$(uci -q get apcontroller."$WIFI".band)
@@ -265,25 +190,15 @@ for WIFI in $WIFIS; do
 
 	MACLIST=$(uci -q get apcontroller."$WIFI".maclist)
 
-
 	for BAND in $BANDS; do
 
 		json_add_object
 
-		ENABLED=$(uci -q get apcontroller."$WIFI".enabled)
-		[ -n "$ENABLED" ] || ENABLED=0
+		json_add_int \
+			"enabled" \
+			"$(uci -q get apcontroller."$WIFI".enabled)"
 
-		HIDDEN=$(uci -q get apcontroller."$WIFI".hidden)
-		[ -n "$HIDDEN" ] || HIDDEN=0
-
-		ISOLATE=$(uci -q get apcontroller."$WIFI".isolate)
-		[ -n "$ISOLATE" ] || ISOLATE=0
-
-		json_add_int "enabled" "$ENABLED"
-
-		json_add_string \
-			"band" \
-			"$BAND"
+		json_add_string "band" "$BAND"
 
 		json_add_string \
 			"ssid" \
@@ -299,19 +214,17 @@ for WIFI in $WIFIS; do
 
 		json_add_int \
 			"hidden" \
-			"$HIDDEN"
+			"$(uci -q get apcontroller."$WIFI".hidden)"
 
 		json_add_int \
 			"isolate" \
-			"$ISOLATE"
+			"$(uci -q get apcontroller."$WIFI".isolate)"
 
 		json_add_string \
 			"network" \
 			"$(uci -q get apcontroller."$WIFI".network)"
 
-		json_add_string \
-			"macfilter" \
-			"$MACFILTER"
+		json_add_string "macfilter" "$MACFILTER"
 
 		json_add_array "maclist"
 
@@ -333,19 +246,18 @@ json_dump > "${BASEPATH}/cmds-${SEC}" || exit 1
 
 
 #
-# Additional script
+# Additional script.
 #
 USEAS=$(uci -q get apcontroller."$SEC".useadditionalscript)
 
 
 #
-# Send configuration to every host.
+# Send to hosts.
 #
 for HOST in $HOSTS; do
 
 	enabled=$(uci -q get apcontroller."$HOST".enabled)
 	[ "$enabled" = "1" ] || continue
-
 
 	ipaddr=$(uci -q get apcontroller."$HOST".ipaddr)
 	[ -n "$ipaddr" ] || continue
@@ -361,8 +273,7 @@ for HOST in $HOSTS; do
 	usekeyfile=$(uci -q get apcontroller."$HOST".usekeyfile)
 	keyfile=$(uci -q get apcontroller."$HOST".keyfile)
 
-	[ -n "$keyfile" ] || \
-		keyfile="/root/.ssh/id_dropbear"
+	[ -n "$keyfile" ] || keyfile="/root/.ssh/id_dropbear"
 
 
 	#
@@ -380,8 +291,7 @@ for HOST in $HOSTS; do
 			"$keyfile" \
 			"$usekeyfile")
 
-		[ -n "$platform" ] || \
-			platform="unknown"
+		[ -n "$platform" ] || platform="unknown"
 
 		echo "$platform" \
 			> "${BASEPATH}/${ipaddr}-${HOST}.platform"
@@ -389,35 +299,64 @@ for HOST in $HOSTS; do
 
 
 	#
-	# SSH options.
+	# If old device was previously cached as unknown,
+	# try detection again.
 	#
+	if [ "$platform" = "unknown" ]; then
+
+		rm -f "${BASEPATH}/${ipaddr}-${HOST}.platform"
+
+		platform=$(detect_platform \
+			"$ipaddr" \
+			"$port" \
+			"$username" \
+			"$password" \
+			"$keyfile" \
+			"$usekeyfile")
+
+		[ -n "$platform" ] || platform="unknown"
+
+		echo "$platform" \
+			> "${BASEPATH}/${ipaddr}-${HOST}.platform"
+	fi
+
+
 	PLATFORM_SSHOPTIONS=$(get_ssh_options "$platform")
 
-
-	#
-	# User supplied SSH options.
-	#
 	sshoptions=$(uci -q get apcontroller."$HOST".sshoptions)
 
-
-	#
-	# SCP options.
-	#
 	scpoptions=$(uci -q get apcontroller."$HOST".scpoptions)
-	[ -n "$scpoptions" ] || \
-		scpoptions="$SCPOPTIONS"
+	[ -n "$scpoptions" ] || scpoptions="$SCPOPTIONS"
 
 
 	T=1
 
 
 	#
-	# =========================================================
+	# Select platform agent.
+	#
+	case "$platform" in
+		openwrt)
+			AGENT="/usr/share/apcontroller/apcontroller-agent-setconfig-openwrt"
+			;;
+		ubiquiti)
+			AGENT="/usr/share/apcontroller/apcontroller-agent-setconfig-ubiquiti"
+			;;
+		omada)
+			AGENT="/usr/share/apcontroller/apcontroller-agent-setconfig-omada"
+			;;
+		*)
+			AGENT=""
+			;;
+	esac
+
+
+	#
+	# ---------------------------------------------------------
 	# KEY AUTHENTICATION
-	# =========================================================
+	# ---------------------------------------------------------
 	#
 	if [ "$usekeyfile" = "1" ] && [ -e "$keyfile" ]; then
-
 
 		#
 		# Additional script.
@@ -427,6 +366,7 @@ for HOST in $HOSTS; do
 			scp \
 				-i "$keyfile" \
 				$PLATFORM_SSHOPTIONS \
+				$sshoptions \
 				$scpoptions \
 				-P "$port" \
 				/usr/share/apcontroller/apcontroller.user \
@@ -434,14 +374,16 @@ for HOST in $HOSTS; do
 				2>/dev/null
 
 			if [ $? -ne 0 ]; then
-				[ -n "$VERBOSE" ] &&
+				if [ -n "$VERBOSE" ]; then
 					echo "$HOST ($ipaddr) [$platform]: ERROR - cannot copy apcontroller.user"
+				fi
 				continue
 			fi
 
 			scp \
 				-i "$keyfile" \
 				$PLATFORM_SSHOPTIONS \
+				$sshoptions \
 				$scpoptions \
 				-P "$port" \
 				/usr/share/apcontroller/apcontroller-agent-as \
@@ -449,8 +391,9 @@ for HOST in $HOSTS; do
 				2>/dev/null
 
 			if [ $? -ne 0 ]; then
-				[ -n "$VERBOSE" ] &&
-					echo "$HOST ($ipaddr) [$platform]: ERROR - cannot copy additional agent"
+				if [ -n "$VERBOSE" ]; then
+					echo "$HOST ($ipaddr) [$platform]: ERROR - cannot copy apcontroller-agent-as"
+				fi
 				continue
 			fi
 		fi
@@ -462,6 +405,7 @@ for HOST in $HOSTS; do
 		scp \
 			-i "$keyfile" \
 			$PLATFORM_SSHOPTIONS \
+			$sshoptions \
 			$scpoptions \
 			-P "$port" \
 			"${BASEPATH}/cmds-${SEC}" \
@@ -469,17 +413,20 @@ for HOST in $HOSTS; do
 			2>/dev/null
 
 		if [ $? -ne 0 ]; then
-			T=1
+			if [ -n "$VERBOSE" ]; then
+				echo "$HOST ($ipaddr) [$platform]: ERROR - cannot copy JSON"
+			fi
 			continue
 		fi
 
 
 		#
-		# Main dispatcher.
+		# Dispatcher.
 		#
 		scp \
 			-i "$keyfile" \
 			$PLATFORM_SSHOPTIONS \
+			$sshoptions \
 			$scpoptions \
 			-P "$port" \
 			/usr/share/apcontroller/apcontroller-agent-setconfig \
@@ -487,7 +434,9 @@ for HOST in $HOSTS; do
 			2>/dev/null
 
 		if [ $? -ne 0 ]; then
-			T=1
+			if [ -n "$VERBOSE" ]; then
+				echo "$HOST ($ipaddr) [$platform]: ERROR - cannot copy dispatcher"
+			fi
 			continue
 		fi
 
@@ -495,43 +444,29 @@ for HOST in $HOSTS; do
 		#
 		# Platform agent.
 		#
-		case "$platform" in
-			openwrt)
-				AGENT="/usr/share/apcontroller/apcontroller-agent-setconfig-openwrt"
-				;;
-			ubiquiti)
-				AGENT="/usr/share/apcontroller/apcontroller-agent-setconfig-ubiquiti"
-				;;
-			omada)
-				AGENT="/usr/share/apcontroller/apcontroller-agent-setconfig-omada"
-				;;
-			*)
-				AGENT=""
-				;;
-		esac
-
-
 		if [ -n "$AGENT" ]; then
 
 			scp \
 				-i "$keyfile" \
 				$PLATFORM_SSHOPTIONS \
+				$sshoptions \
 				$scpoptions \
 				-P "$port" \
 				"$AGENT" \
-				"${username}@${ipaddr}:/tmp/apcontroller-agent-setconfig-$(basename "$AGENT" | sed 's/apcontroller-agent-setconfig-//')" \
+				"${username}@${ipaddr}:/tmp/$(basename "$AGENT")" \
 				2>/dev/null
 
 			if [ $? -ne 0 ]; then
-				T=1
+				if [ -n "$VERBOSE" ]; then
+					echo "$HOST ($ipaddr) [$platform]: ERROR - cannot copy platform agent"
+				fi
 				continue
 			fi
 		fi
 
 
 		#
-		# FIX:
-		# Make remote agents executable.
+		# chmod remotely.
 		#
 		ssh \
 			-q \
@@ -540,7 +475,7 @@ for HOST in $HOSTS; do
 			$sshoptions \
 			-p "$port" \
 			"${username}@${ipaddr}" \
-			"chmod +x \
+			"chmod 755 \
 			 /tmp/apcontroller-agent-setconfig \
 			 /tmp/apcontroller-agent-as \
 			 /tmp/apcontroller-agent-setconfig-openwrt \
@@ -549,14 +484,15 @@ for HOST in $HOSTS; do
 			>/dev/null 2>&1
 
 		if [ $? -ne 0 ]; then
-			[ -n "$VERBOSE" ] &&
-				echo "${NAME:-$HOST} (${ipaddr}) [${platform}]: ERROR - cannot chmod remote agents"
+			if [ -n "$VERBOSE" ]; then
+				echo "$HOST ($ipaddr) [$platform]: ERROR - cannot chmod remote agents"
+			fi
 			continue
 		fi
 
 
 		#
-		# Execute dispatcher.
+		# Execute.
 		#
 		ssh \
 			-q \
@@ -572,12 +508,11 @@ for HOST in $HOSTS; do
 
 
 	#
-	# =========================================================
+	# ---------------------------------------------------------
 	# PASSWORD AUTHENTICATION
-	# =========================================================
+	# ---------------------------------------------------------
 	#
 	else
-
 
 		#
 		# Additional script.
@@ -587,6 +522,7 @@ for HOST in $HOSTS; do
 			sshpass -p "$password" \
 				scp \
 				$PLATFORM_SSHOPTIONS \
+				$sshoptions \
 				$scpoptions \
 				-P "$port" \
 				/usr/share/apcontroller/apcontroller.user \
@@ -594,14 +530,16 @@ for HOST in $HOSTS; do
 				2>/dev/null
 
 			if [ $? -ne 0 ]; then
-				[ -n "$VERBOSE" ] &&
+				if [ -n "$VERBOSE" ]; then
 					echo "$HOST ($ipaddr) [$platform]: ERROR - cannot copy apcontroller.user"
+				fi
 				continue
 			fi
 
 			sshpass -p "$password" \
 				scp \
 				$PLATFORM_SSHOPTIONS \
+				$sshoptions \
 				$scpoptions \
 				-P "$port" \
 				/usr/share/apcontroller/apcontroller-agent-as \
@@ -609,8 +547,9 @@ for HOST in $HOSTS; do
 				2>/dev/null
 
 			if [ $? -ne 0 ]; then
-				[ -n "$VERBOSE" ] &&
-					echo "$HOST ($ipaddr) [$platform]: ERROR - cannot copy additional agent"
+				if [ -n "$VERBOSE" ]; then
+					echo "$HOST ($ipaddr) [$platform]: ERROR - cannot copy apcontroller-agent-as"
+				fi
 				continue
 			fi
 		fi
@@ -622,6 +561,7 @@ for HOST in $HOSTS; do
 		sshpass -p "$password" \
 			scp \
 			$PLATFORM_SSHOPTIONS \
+			$sshoptions \
 			$scpoptions \
 			-P "$port" \
 			"${BASEPATH}/cmds-${SEC}" \
@@ -629,17 +569,20 @@ for HOST in $HOSTS; do
 			2>/dev/null
 
 		if [ $? -ne 0 ]; then
-			T=1
+			if [ -n "$VERBOSE" ]; then
+				echo "$HOST ($ipaddr) [$platform]: ERROR - cannot copy JSON"
+			fi
 			continue
 		fi
 
 
 		#
-		# Main dispatcher.
+		# Dispatcher.
 		#
 		sshpass -p "$password" \
 			scp \
 			$PLATFORM_SSHOPTIONS \
+			$sshoptions \
 			$scpoptions \
 			-P "$port" \
 			/usr/share/apcontroller/apcontroller-agent-setconfig \
@@ -647,7 +590,9 @@ for HOST in $HOSTS; do
 			2>/dev/null
 
 		if [ $? -ne 0 ]; then
-			T=1
+			if [ -n "$VERBOSE" ]; then
+				echo "$HOST ($ipaddr) [$platform]: ERROR - cannot copy dispatcher"
+			fi
 			continue
 		fi
 
@@ -655,55 +600,29 @@ for HOST in $HOSTS; do
 		#
 		# Platform agent.
 		#
-		case "$platform" in
-			openwrt)
-				AGENT="/usr/share/apcontroller/apcontroller-agent-setconfig-openwrt"
-				;;
-			ubiquiti)
-				AGENT="/usr/share/apcontroller/apcontroller-agent-setconfig-ubiquiti"
-				;;
-			omada)
-				AGENT="/usr/share/apcontroller/apcontroller-agent-setconfig-omada"
-				;;
-			*)
-				AGENT=""
-				;;
-		esac
-
-
 		if [ -n "$AGENT" ]; then
-
-			case "$platform" in
-				openwrt)
-					REMOTE_AGENT="/tmp/apcontroller-agent-setconfig-openwrt"
-					;;
-				ubiquiti)
-					REMOTE_AGENT="/tmp/apcontroller-agent-setconfig-ubiquiti"
-					;;
-				omada)
-					REMOTE_AGENT="/tmp/apcontroller-agent-setconfig-omada"
-					;;
-			esac
 
 			sshpass -p "$password" \
 				scp \
 				$PLATFORM_SSHOPTIONS \
+				$sshoptions \
 				$scpoptions \
 				-P "$port" \
 				"$AGENT" \
-				"${username}@${ipaddr}:${REMOTE_AGENT}" \
+				"${username}@${ipaddr}:/tmp/$(basename "$AGENT")" \
 				2>/dev/null
 
 			if [ $? -ne 0 ]; then
-				T=1
+				if [ -n "$VERBOSE" ]; then
+					echo "$HOST ($ipaddr) [$platform]: ERROR - cannot copy platform agent"
+				fi
 				continue
 			fi
 		fi
 
 
 		#
-		# FIX:
-		# Make remote agents executable.
+		# chmod remotely.
 		#
 		sshpass -p "$password" \
 			ssh \
@@ -712,7 +631,7 @@ for HOST in $HOSTS; do
 			$sshoptions \
 			-p "$port" \
 			"${username}@${ipaddr}" \
-			"chmod +x \
+			"chmod 755 \
 			 /tmp/apcontroller-agent-setconfig \
 			 /tmp/apcontroller-agent-as \
 			 /tmp/apcontroller-agent-setconfig-openwrt \
@@ -721,14 +640,15 @@ for HOST in $HOSTS; do
 			>/dev/null 2>&1
 
 		if [ $? -ne 0 ]; then
-			[ -n "$VERBOSE" ] &&
+			if [ -n "$VERBOSE" ]; then
 				echo "$HOST ($ipaddr) [$platform]: ERROR - cannot chmod remote agents"
+			fi
 			continue
 		fi
 
 
 		#
-		# Execute dispatcher.
+		# Execute.
 		#
 		sshpass -p "$password" \
 			ssh \
@@ -746,7 +666,7 @@ for HOST in $HOSTS; do
 
 
 	#
-	# Cleanup remote files only after successful execution.
+	# Cleanup.
 	#
 	if [ "$T" -eq 0 ]; then
 
@@ -805,7 +725,7 @@ for HOST in $HOSTS; do
 
 		NAME=$(uci -q get apcontroller."$HOST".name)
 
-		echo "${NAME} (${ipaddr}) [${platform}]: ${RET}"
+		echo "${NAME:-$HOST} (${ipaddr}) [${platform}]: ${RET}"
 	fi
 
 done
