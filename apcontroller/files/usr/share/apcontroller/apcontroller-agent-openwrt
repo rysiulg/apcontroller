@@ -1,0 +1,181 @@
+cat > /usr/share/apcontroller/apcontroller-agent-openwrt <<'EOF'
+#!/bin/sh
+
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+
+#
+# APController OpenWrt agent
+#
+
+json_escape()
+{
+	printf '%s' "$1" |
+		awk '
+		BEGIN { ORS="" }
+		{
+			gsub(/\\/, "\\\\");
+			gsub(/"/, "\\\"");
+			gsub(/\t/, "\\t");
+			gsub(/\r/, "\\r");
+			gsub(/\n/, "\\n");
+			printf "%s", $0
+		}'
+}
+
+jstr()
+{
+	printf '"%s"' "$(json_escape "$1")"
+}
+
+#
+# ---------------------------------------------------------------
+# Basic system information
+# ---------------------------------------------------------------
+#
+
+hostname_val="$(uci -q get system.@system[0].hostname 2>/dev/null)"
+[ -n "$hostname_val" ] ||
+	hostname_val="$(hostname 2>/dev/null)"
+
+model="$(cat /tmp/sysinfo/model 2>/dev/null)"
+[ -n "$model" ] ||
+	model="$(cat /proc/device-tree/model 2>/dev/null)"
+
+software="$(. /etc/openwrt_release 2>/dev/null; printf '%s' "$DISTRIB_DESCRIPTION")"
+
+uptime="$(awk '{printf "%d",$1}' /proc/uptime 2>/dev/null)"
+[ -n "$uptime" ] || uptime=0
+
+load="$(awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null)"
+
+#
+# ---------------------------------------------------------------
+# MAC
+# ---------------------------------------------------------------
+#
+
+mac=""
+
+for dev in br-lan br0 eth0 lan; do
+
+	[ -e "/sys/class/net/$dev/address" ] || continue
+
+	mac="$(cat "/sys/class/net/$dev/address" 2>/dev/null)"
+
+	[ -n "$mac" ] && break
+done
+
+#
+# ---------------------------------------------------------------
+# WiFi
+# ---------------------------------------------------------------
+#
+
+channels2g=""
+channels5g=""
+channels6g=""
+
+if command -v iw >/dev/null 2>&1; then
+
+	while read -r phy band channel; do
+
+		case "$band" in
+			2g)
+				channels2g="${channels2g}${channels2g:+,}${channel}"
+				;;
+
+			5g)
+				channels5g="${channels5g}${channels5g:+,}${channel}"
+				;;
+
+			6g)
+				channels6g="${channels6g}${channels6g:+,}${channel}"
+				;;
+		esac
+
+	done <<EOF_IW
+$(iw dev 2>/dev/null |
+	awk '
+		/^phy#/ {
+			phy=$1
+			gsub("#","",phy)
+		}
+		/	channel / {
+			channel=$2
+		}
+	')
+EOF_IW
+
+fi
+
+#
+# ---------------------------------------------------------------
+# Clients
+# ---------------------------------------------------------------
+#
+
+clients2g='[]'
+clients5g='[]'
+clients6g='[]'
+
+#
+# hostapd ubus information if available
+#
+if command -v ubus >/dev/null 2>&1; then
+
+	#
+	# Actual client extraction can be extended here depending
+	# on hostapd configuration.
+	#
+
+	:
+fi
+
+#
+# ---------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------
+#
+
+printf '{'
+
+printf '"mac":%s,' \
+	"$(jstr "$mac")"
+
+printf '"hostname":%s,' \
+	"$(jstr "$hostname_val")"
+
+printf '"model":%s,' \
+	"$(jstr "$model")"
+
+printf '"software":%s,' \
+	"$(jstr "$software")"
+
+printf '"uptime":%s,' \
+	"$uptime"
+
+printf '"load":%s,' \
+	"$(jstr "$load")"
+
+printf '"channels2g":%s,' \
+	"$(jstr "$channels2g")"
+
+printf '"channels5g":%s,' \
+	"$(jstr "$channels5g")"
+
+printf '"channels6g":%s,' \
+	"$(jstr "$channels6g")"
+
+printf '"clientslist2g":%s,' \
+	"$clients2g"
+
+printf '"clientslist5g":%s,' \
+	"$clients5g"
+
+printf '"clientslist6g":%s' \
+	"$clients6g"
+
+printf '}\n'
+EOF
+
+chmod 755 /usr/share/apcontroller/apcontroller-agent-openwrt
