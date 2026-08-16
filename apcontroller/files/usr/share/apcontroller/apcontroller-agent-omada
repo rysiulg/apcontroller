@@ -1,57 +1,116 @@
 #!/bin/sh
 
+# ============================================================
 # apcontroller-agent-omada
 # TP-Link Omada EAP 5.x
 #
-# Output: JSON
+# Komunikacja:
+#   OpenWrt -> SSH -> EAP CLI
+#
+# WAŻNE:
+#   - NIE używa scp
+#   - NIE używa tftp
+#   - NIE tworzy plików na EAP
+#   - komendy są wysyłane bezpośrednio do EAP CLI
 #
 # Usage:
+#
 #   apcontroller-agent-omada <host> <user> <password> [port]
+#   apcontroller-agent-omada poll <host> <user> <password> [port]
 #
 # Example:
+#
 #   apcontroller-agent-omada 192.168.88.77 admin 'password'
+#
+#   apcontroller-agent-omada poll 192.168.88.77 admin 'password'
+#
+# ============================================================
+
+
+# ------------------------------------------------------------
+# ARGUMENTS
+# ------------------------------------------------------------
+
+POLL=0
+
+if [ "$1" = "poll" ]; then
+	POLL=1
+	shift
+fi
 
 HOST="$1"
 USER="$2"
 PASSWORD="$3"
 PORT="${4:-22}"
 
+
 if [ -z "$HOST" ] || [ -z "$USER" ] || [ -z "$PASSWORD" ]; then
-	echo "usage: $0 <host> <user> <password> [port]" >&2
+	echo "usage: $0 [poll] <host> <user> <password> [port]" >&2
 	exit 2
 fi
+
+
+# ------------------------------------------------------------
+# DEPENDENCIES
+# ------------------------------------------------------------
 
 command -v sshpass >/dev/null 2>&1 || {
 	echo "sshpass not found" >&2
 	exit 127
 }
 
-SSH="sshpass -p $PASSWORD ssh"
+command -v ssh >/dev/null 2>&1 || {
+	echo "ssh not found" >&2
+	exit 127
+}
+
+
+# ------------------------------------------------------------
+# SSH OPTIONS
+# ------------------------------------------------------------
+
+KNOWN_HOSTS="/tmp/apcontroller-omada-known_hosts"
 
 SSH_OPTS="
 -q
+-T
 -o StrictHostKeyChecking=accept-new
--o UserKnownHostsFile=/tmp/apcontroller-omada-known_hosts
+-o UserKnownHostsFile=$KNOWN_HOSTS
 -o ConnectTimeout=8
 -o ServerAliveInterval=5
 -o ServerAliveCountMax=2
 -o HostKeyAlgorithms=+ssh-rsa
 -o PubkeyAcceptedAlgorithms=+ssh-rsa
+-o LogLevel=ERROR
 -p $PORT
 "
 
+
+# ------------------------------------------------------------
+# RUN EAP CLI
+#
+# Komendy idą przez stdin.
+#
+# NIE:
+#   ssh host "sh script"
+#
+# TAK:
+#   printf commands | ssh host
+#
+# Dzięki temu niczego nie trzeba tworzyć na EAP.
+# ------------------------------------------------------------
+
 run_cli()
 {
-	COMMANDS="$1"
-
-	printf '%s\n' \
-		"$COMMANDS" |
-		$SSH $SSH_OPTS "$USER@$HOST" 2>/dev/null
+	sshpass -p "$PASSWORD" ssh $SSH_OPTS "$USER@$HOST" 2>/dev/null
 }
 
-RAW=$(
-run_cli '
-enable
+
+# ------------------------------------------------------------
+# COMMAND LIST
+# ------------------------------------------------------------
+
+COMMANDS='enable
 show version
 show uptime
 show memory summary
@@ -62,78 +121,180 @@ show traffic
 show controller-ip
 show device-id
 show status cloud
+show status device
+show date
+show temperature
 '
-)
+
+
+# ------------------------------------------------------------
+# POLL
+# ------------------------------------------------------------
+
+if [ "$POLL" = "1" ]; then
+
+	RAW=$(
+		printf '%s\n' "$COMMANDS" |
+		run_cli
+	)
+
+else
+
+	RAW=$(
+		printf '%s\n' "$COMMANDS" |
+		run_cli
+	)
+
+fi
+
+
+# ------------------------------------------------------------
+# NO RESPONSE
+# ------------------------------------------------------------
 
 if [ -z "$RAW" ]; then
 	echo '{"error":"No response from Omada EAP"}'
 	exit 1
 fi
 
-VERSION=$(printf '%s\n' "$RAW" |
-	sed -n 's/^\([0-9][0-9A-Za-z. -]*Build[^$]*\)$/\1/p' |
-	head -n1)
 
-UPTIME=$(printf '%s\n' "$RAW" |
-	sed -n 's/.*up \([^,]*\), load average: .*/\1/p' |
-	head -n1)
+# ------------------------------------------------------------
+# JSON ESCAPE
+# ------------------------------------------------------------
 
-LOAD=$(printf '%s\n' "$RAW" |
-	sed -n 's/.*load average: *\(.*\)$/\1/p' |
-	head -n1)
+json_escape()
+{
+	printf '%s' "$1" |
+	awk 'BEGIN { ORS="" }
+	{
+		gsub(/\\/,"\\\\")
+		gsub(/"/,"\\\"")
+		gsub(/\r/,"")
+		gsub(/\t/,"\\t")
+		print
+	}'
+}
 
-IP=$(printf '%s\n' "$RAW" |
+
+# ------------------------------------------------------------
+# VERSION
+# ------------------------------------------------------------
+
+VERSION=$(
+	printf '%s\n' "$RAW" |
+	grep 'Build ' |
+	head -n1 |
+	sed 's/^[[:space:]]*//'
+)
+
+
+# ------------------------------------------------------------
+# UPTIME
+# ------------------------------------------------------------
+
+UPTIME=$(
+	printf '%s\n' "$RAW" |
+	sed -n 's/.*up \([^,]*\), load average:.*/\1/p' |
+	head -n1
+)
+
+
+# ------------------------------------------------------------
+# LOAD
+# ------------------------------------------------------------
+
+LOAD=$(
+	printf '%s\n' "$RAW" |
+	sed -n 's/.*load average:[[:space:]]*\(.*\)$/\1/p' |
+	head -n1
+)
+
+
+# ------------------------------------------------------------
+# IP
+# ------------------------------------------------------------
+
+IP=$(
+	printf '%s\n' "$RAW" |
 	awk '
-		/^br0[[:space:]]/ { p=1 }
-		p && /inet addr:/ {
+		/^br0[[:space:]]/ {
+			inbr=1
+			next
+		}
+
+		inbr && /inet addr:/ {
 			split($0,a,"inet addr:")
 			split(a[2],b," ")
 			print b[1]
 			exit
 		}
-	')
+	'
+)
 
-MAC=$(printf '%s\n' "$RAW" |
+
+# ------------------------------------------------------------
+# MAC
+# ------------------------------------------------------------
+
+MAC=$(
+	printf '%s\n' "$RAW" |
 	awk '
 		/^eth0[[:space:]]/ {
-			for(i=1;i<=NF;i++)
-				if($i=="HWaddr")
+			for (i=1;i<=NF;i++) {
+				if ($i=="HWaddr") {
 					print $(i+1)
+					exit
+				}
+			}
 		}
-	' |
-	head -n1)
+	'
+)
 
-DEVICE_ID=$(printf '%s\n' "$RAW" |
-	awk '
-		/^[0-9A-F]{40}$/ {
-			print
-			exit
-		}
-	')
 
-CLOUD=$(printf '%s\n' "$RAW" |
-	sed -n 's/^Cloud Status:\s*//p' |
-	head -n1)
+# ------------------------------------------------------------
+# DEVICE ID
+#
+# Nie używamy {40}, bo różne BusyBox awk mogą tego nie obsługiwać.
+# ------------------------------------------------------------
 
-RAM_TOTAL=$(printf '%s\n' "$RAW" |
-	sed -n 's/^MemTotal:[[:space:]]*\([0-9]*\) kB/\1/p' |
-	head -n1)
+DEVICE_ID=$(
+	printf '%s\n' "$RAW" |
+	grep -E '^[0-9A-Fa-f]{40}$' |
+	head -n1
+)
 
-RAM_FREE=$(printf '%s\n' "$RAW" |
-	sed -n 's/^MemFree:[[:space:]]*\([0-9]*\) kB/\1/p' |
-	head -n1)
 
-json_escape()
-{
-	printf '%s' "$1" |
-	awk 'BEGIN { ORS="" } {
-		gsub(/\\/,"\\\\");
-		gsub(/"/,"\\\"");
-		gsub(/\r/,"");
-		gsub(/\t/,"\\t");
-		print
-	}'
-}
+# ------------------------------------------------------------
+# CLOUD STATUS
+# ------------------------------------------------------------
+
+CLOUD=$(
+	printf '%s\n' "$RAW" |
+	sed -n 's/^Cloud Status:[[:space:]]*//p' |
+	head -n1
+)
+
+
+# ------------------------------------------------------------
+# MEMORY
+# ------------------------------------------------------------
+
+RAM_TOTAL=$(
+	printf '%s\n' "$RAW" |
+	sed -n 's/^MemTotal:[[:space:]]*\([0-9][0-9]*\) kB/\1/p' |
+	head -n1
+)
+
+RAM_FREE=$(
+	printf '%s\n' "$RAW" |
+	sed -n 's/^MemFree:[[:space:]]*\([0-9][0-9]*\) kB/\1/p' |
+	head -n1
+)
+
+
+# ------------------------------------------------------------
+# JSON ESCAPE VALUES
+# ------------------------------------------------------------
 
 VERSION=$(json_escape "$VERSION")
 UPTIME=$(json_escape "$UPTIME")
@@ -143,7 +304,13 @@ MAC=$(json_escape "$MAC")
 DEVICE_ID=$(json_escape "$DEVICE_ID")
 CLOUD=$(json_escape "$CLOUD")
 
+
+# ------------------------------------------------------------
+# JSON START
+# ------------------------------------------------------------
+
 printf '{'
+
 printf '"type":"omada-eap",'
 printf '"ipaddr":"%s",' "$IP"
 printf '"mac":"%s",' "$MAC"
@@ -155,49 +322,77 @@ printf '"cloud_status":"%s",' "$CLOUD"
 printf '"memory_total":"%s",' "$RAM_TOTAL"
 printf '"memory_free":"%s",' "$RAM_FREE"
 
+
+# ============================================================
+# WIFI
+# ============================================================
+
 printf '"wifi":['
 
 FIRST=1
 
 printf '%s\n' "$RAW" |
-awk '
-/^ath[0-9]+[[:space:]]+IEEE/ {
-	if (match($0,/^([^ ]+).*ESSID:"([^"]+)"/,a)) {
-		if (match($0,/Frequency:([0-9.]+) GHz/,f)) {
-			if (match($0,/Access Point: ([0-9A-Fa-f:]+)/,m)) {
-				printf "%s|%s|%s|%s\n",a[1],a[2],f[1],m[1]
-			}
-		}
-	}
-}
-' |
-while IFS='|' read IFACE SSID FREQ BSSID; do
+while IFS= read -r LINE
+do
 
-	BAND=""
+	case "$LINE" in
 
-	awk "BEGIN {
-		if ($FREQ < 3) print \"2g\";
-		else if ($FREQ < 6) print \"5g\";
-		else print \"6g\";
-	}" |
-	while read BAND; do
+		ath[0-9]*" IEEE "*)
+			IFACE=$(printf '%s\n' "$LINE" | awk '{print $1}')
 
-		[ "$FIRST" = "1" ] || printf ','
-		FIRST=0
+			SSID=$(
+				printf '%s\n' "$LINE" |
+				sed -n 's/.*ESSID:"\([^"]*\)".*/\1/p'
+			)
 
-		printf '{'
-		printf '"ifname":"%s",' "$IFACE"
-		printf '"ssid":"%s",' "$(json_escape "$SSID")"
-		printf '"frequency":"%s",' "$FREQ"
-		printf '"band":"%s",' "$BAND"
-		printf '"bssid":"%s"' "$BSSID"
-		printf '}'
+			FREQ=$(
+				printf '%s\n' "$LINE" |
+				sed -n 's/.*Frequency:\([0-9.]*\) GHz.*/\1/p'
+			)
 
-	done
+			BSSID=$(
+				printf '%s\n' "$LINE" |
+				sed -n 's/.*Access Point:[[:space:]]*\([0-9A-Fa-f:]*\).*/\1/p'
+			)
+
+			[ -n "$FREQ" ] || continue
+
+			BAND=$(
+				awk -v f="$FREQ" '
+					BEGIN {
+						if (f < 3)
+							print "2g"
+						else if (f < 6)
+							print "5g"
+						else
+							print "6g"
+					}
+				'
+			)
+
+			[ "$FIRST" = "1" ] || printf ','
+			FIRST=0
+
+			printf '{'
+			printf '"ifname":"%s",' "$IFACE"
+			printf '"ssid":"%s",' "$(json_escape "$SSID")"
+			printf '"frequency":"%s",' "$FREQ"
+			printf '"band":"%s",' "$BAND"
+			printf '"bssid":"%s"' "$BSSID"
+			printf '}'
+
+			;;
+
+	esac
 
 done
 
 printf '],'
+
+
+# ============================================================
+# CLIENTS
+# ============================================================
 
 printf '"clients":['
 
@@ -205,39 +400,54 @@ FIRST=1
 
 printf '%s\n' "$RAW" |
 awk '
-/^ath[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9A-Fa-f-]{17}/ {
-	if ($1 ~ /^ath/) {
-		if ($2 ~ /^[0-9]+$/) {
-			printf "%s|%s|%s|%s|%s|%s|%s|%s\n",
-				$1,$2,$3,$4,$5,$6,$7,$8
-		}
-	}
+/^ath[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-][0-9A-Fa-f-]/ {
+
+	print $1 "|" $2 "|" $3 "|" $4 "|" $5 "|" $6 "|" $7 "|" $8
+
 }
 ' |
-while IFS='|' read IFACE CHANNEL MACADDR TXRATE RXRATE RSSI CONNECTED INACTIVE; do
+while IFS='|' read IFACE CHANNEL MACADDR TXRATE RXRATE RSSI CONNECTED INACTIVE
+do
 
-	MACADDR=$(printf '%s' "$MACADDR" |
+	[ -n "$MACADDR" ] || continue
+
+	MACADDR=$(
+		printf '%s' "$MACADDR" |
 		tr 'a-f' 'A-F' |
-		sed 's/-/:/g')
+		sed 's/-/:/g'
+	)
 
-	BAND="2g"
+
+	# --------------------------------------------------------
+	# BAND
+	# --------------------------------------------------------
 
 	case "$IFACE" in
+
 		ath0|ath1|ath2)
 			BAND="2g"
 			;;
+
 		ath10|ath11|ath12)
 			BAND="5g"
 			;;
+
+		*)
+			BAND="unknown"
+			;;
+
 	esac
 
-	TXNUM=$(printf '%s' "$TXRATE" | sed 's/[^0-9.].*//')
-	RXNUM=$(printf '%s' "$RXRATE" | sed 's/[^0-9.].*//')
+
+	# --------------------------------------------------------
+	# JSON
+	# --------------------------------------------------------
 
 	[ "$FIRST" = "1" ] || printf ','
 	FIRST=0
 
 	printf '{'
+
 	printf '"ap":"%s",' "$IFACE"
 	printf '"mac":"%s",' "$MACADDR"
 	printf '"channel":%s,' "$CHANNEL"
@@ -247,9 +457,13 @@ while IFS='|' read IFACE CHANNEL MACADDR TXRATE RXRATE RSSI CONNECTED INACTIVE; 
 	printf '"connected":"%s",' "$CONNECTED"
 	printf '"inactive":"%s",' "$INACTIVE"
 	printf '"band":"%s"' "$BAND"
+
 	printf '}'
 
 done
 
+
 printf ']'
 printf '}\n'
+
+exit 0
