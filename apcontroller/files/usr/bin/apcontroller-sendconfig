@@ -26,6 +26,18 @@ VERBOSE="$2"
 #
 BASEPATH="/tmp/apcontroller"
 
+for AGENT in \
+    /usr/share/apcontroller/apcontroller-agent-setconfig \
+    /usr/share/apcontroller/apcontroller-agent-setconfig-openwrt \
+    /usr/share/apcontroller/apcontroller-agent-setconfig-ubiquiti \
+    /usr/share/apcontroller/apcontroller-agent-setconfig-omada \
+    /usr/share/apcontroller/apcontroller-agent-as
+do
+    [ -f "$AGENT" ] || continue
+    chmod +x "$AGENT"
+done
+
+
 T=$(uci -q get apcontroller.@global[0].path)
 [ -n "$T" ] && BASEPATH="$T"
 
