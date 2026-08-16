@@ -2179,24 +2179,27 @@ rpc_discover()
 	local netfile
 	local hostfile
 
+	local iface
+	local up
+	local addr
+	local mask
+
 	local network
 	local base
 	local cidr
 
-	local start
-	local end
-	local n
+	local scan_start
+	local scan_end
+	local scan_ip
 	local target
 
-	local own_ip
-	local iface
-	local status
+	local platform
+	local cfg
+	local existing
 
 	local first
-	local count
-
-	local MAX_DISCOVERY_HOSTS
-	local DISCOVERY_TIMEOUT
+	local baseaddr
+	local scan_range
 
 	get_discovery_credentials
 
@@ -2204,21 +2207,7 @@ rpc_discover()
 	password="$DISCOVERY_PASSWORD"
 	port="$DISCOVERY_PORT"
 
-	#
-	# Maksymalnie 254 hosty na /24.
-	# Duże sieci /16 są ograniczane, żeby rpcd nie wisiał.
-	#
-	MAX_DISCOVERY_HOSTS="$(uci -q get \
-		"${CONFIG}.@global[0].discovery_max_hosts" \
-		2>/dev/null)"
-
-	[ -n "$MAX_DISCOVERY_HOSTS" ] || MAX_DISCOVERY_HOSTS=1024
-
-	DISCOVERY_TIMEOUT="$(uci -q get \
-		"${CONFIG}.@global[0].discovery_timeout" \
-		2>/dev/null)"
-
-	[ -n "$DISCOVERY_TIMEOUT" ] || DISCOVERY_TIMEOUT=3
+	[ -n "$port" ] || port=22
 
 	if [ -z "$username" ]; then
 		printf '{"ok":false,"error":"discovery username is empty"}\n'
@@ -2231,65 +2220,218 @@ rpc_discover()
 	hostfile="${BASEPATH}/.discover-hosts.$$"
 
 	rm -f "$netfile" "$hostfile"
-
-	touch "$netfile" "$hostfile"
+	: > "$netfile"
+	: > "$hostfile"
 
 	#
-	# -----------------------------------------------------------------------
-	# NETWORK DISCOVERY
-	# -----------------------------------------------------------------------
+	# ===============================================================
+	# DISCOVERY NETWORKS
+	#
+	# TYLKO:
+	#
+	#   lan
+	#   lan_*
+	#   vpn
+	#   vpn_*
+	#   wg*
+	#   wireguard*
+	#   ipsec*
+	#   tun*
+	#
+	# NIGDY:
+	#
+	#   wan
+	#   wan6
+	#   guest
+	#   loopback
+	#
+	# ===============================================================
 	#
 
-	if ! discover_networks "$netfile"; then
+	if command -v ubus >/dev/null 2>&1 &&
+	   command -v jsonfilter >/dev/null 2>&1; then
 
-		rm -f "$netfile" "$hostfile"
+		for iface in $(
+			ubus call network.interface dump 2>/dev/null |
+			jsonfilter -q -e '@.interface[*].interface' 2>/dev/null
+		); do
 
-		printf '{"ok":false,"error":"cannot determine LAN/VPN networks"}\n'
-		return 1
+			if ! discovery_interface_allowed "$iface"; then
+				continue
+			fi
+
+			#
+			# Twarda ochrona WAN/GUEST.
+			#
+			case "$iface" in
+				wan|wan6|wan_*|wan6_*|guest|guest_*|loopback)
+					continue
+					;;
+			esac
+
+			#
+			# Interface musi być UP.
+			#
+			up="$(
+				ubus call "network.interface.${iface}" status 2>/dev/null |
+				jsonfilter -q -e '@.up' 2>/dev/null
+			)"
+
+			case "$up" in
+				true|1)
+					;;
+				*)
+					continue
+					;;
+			esac
+
+			#
+			# REAL IPv4 address.
+			#
+			addr="$(
+				ubus call "network.interface.${iface}" status 2>/dev/null |
+				jsonfilter -q -e '@["ipv4-address"][0].address' 2>/dev/null
+			)"
+
+			#
+			# REAL prefix.
+			#
+			mask="$(
+				ubus call "network.interface.${iface}" status 2>/dev/null |
+				jsonfilter -q -e '@["ipv4-address"][0].mask' 2>/dev/null
+			)"
+
+			[ -n "$addr" ] || continue
+			[ -n "$mask" ] || continue
+
+			case "$addr" in
+				*[!0-9.]*)
+					continue
+					;;
+			esac
+
+			case "$mask" in
+				''|*[!0-9]*)
+					continue
+					;;
+			esac
+
+			[ "$mask" -ge 1 ] 2>/dev/null || continue
+			[ "$mask" -le 32 ] 2>/dev/null || continue
+
+			cidr="$mask"
+
+			#
+			# =======================================================
+			# REAL NETWORK = address AND netmask
+			#
+			# Nie wolno tutaj używać samego adresu.
+			# =======================================================
+			#
+
+			base="$(
+				awk -F. -v p="$cidr" '
+				{
+					a=$1
+					b=$2
+					c=$3
+					d=$4
+
+					if (p <= 8) {
+						x=2^(8-p)
+						a=int(a/x)*x
+						printf "%d.0.0.0\n", a
+						exit
+					}
+
+					if (p <= 16) {
+						x=2^(16-p)
+						b=int(b/x)*x
+						printf "%d.%d.0.0\n", a,b
+						exit
+					}
+
+					if (p <= 24) {
+						x=2^(24-p)
+						c=int(c/x)*x
+						printf "%d.%d.%d.0\n", a,b,c
+						exit
+					}
+
+					x=2^(32-p)
+					d=int(d/x)*x
+
+					printf "%d.%d.%d.%d\n", a,b,c,d
+					exit
+				}
+				' 2>/dev/null
+			)"
+
+			[ -n "$base" ] || continue
+
+			network="${base}/${cidr}"
+
+			#
+			# Ta sama sieć może być widoczna przez kilka interfejsów.
+			#
+			if ! grep -F -x -q "$network" "$netfile" 2>/dev/null; then
+				printf '%s\n' "$network" >> "$netfile"
+			fi
+
+		done
+
+	else
+
+		#
+		# ===========================================================
+		# FALLBACK
+		# ===========================================================
+		#
+
+		if command -v ip >/dev/null 2>&1; then
+
+			ip -4 route show scope link 2>/dev/null |
+			while read -r network rest; do
+
+				[ -n "$network" ] || continue
+
+				case "$network" in
+					default|0.0.0.0/*)
+						continue
+						;;
+				esac
+
+				case "$rest" in
+					*dev\ wan*|*dev\ wan6*|*dev\ guest*)
+						continue
+						;;
+				esac
+
+				case "$network" in
+					*[!0-9./]*)
+						continue
+						;;
+				esac
+
+				printf '%s\n' "$network"
+
+			done >> "$netfile"
+		fi
 	fi
 
-	if [ ! -s "$netfile" ]; then
-
-		rm -f "$netfile" "$hostfile"
-
-		printf '{"ok":false,"error":"no LAN/VPN IPv4 network found"}\n'
-		return 1
+	#
+	# Unikalne sieci.
+	#
+	if [ -s "$netfile" ]; then
+		sort -u "$netfile" > "${netfile}.sort" 2>/dev/null &&
+		mv "${netfile}.sort" "$netfile" 2>/dev/null
 	fi
 
 	#
-	# -----------------------------------------------------------------------
-	# LOCAL IPs
-	# -----------------------------------------------------------------------
-	#
-
-	localipfile="${BASEPATH}/.discover-local.$$"
-
-	rm -f "$localipfile"
-	touch "$localipfile"
-
-	for iface in $(
-		ubus call network.interface dump 2>/dev/null |
-		jsonfilter -q -e '@.interface[*].interface' 2>/dev/null
-	); do
-
-		discovery_interface_allowed "$iface" || continue
-
-		status="$(get_interface_ipv4 "$iface")"
-
-		[ -n "$status" ] || continue
-
-		printf '%s' "$status" |
-		jsonfilter -q -e '@["ipv4-address"][*].address' \
-			2>/dev/null >> "$localipfile"
-	done
-
-	#
-	# -----------------------------------------------------------------------
+	# ===============================================================
 	# SCAN
-	# -----------------------------------------------------------------------
+	# ===============================================================
 	#
-
-	count=0
 
 	while read -r network; do
 
@@ -2308,129 +2450,248 @@ rpc_discover()
 		[ "$cidr" -le 32 ] 2>/dev/null || continue
 
 		#
-		# Network integer.
+		# ===========================================================
+		# NETWORK -> integer range
+		# ===========================================================
 		#
-		base_int="$(ipv4_to_int "$base" 2>/dev/null)"
 
-		case "$base_int" in
+		scan_range="$(
+			awk -F. -v p="$cidr" '
+			{
+				n=($1*16777216)+
+				  ($2*65536)+
+				  ($3*256)+
+				  $4
+
+				size=2^(32-p)
+
+				start=n
+				end=n+size-1
+
+				#
+				# /31 i /32 nie mają klasycznego
+				# network/broadcast do pominięcia.
+				#
+				if (p < 31) {
+					start=n+1
+					end=n+size-2
+				}
+
+				printf "%.0f %.0f\n",start,end
+				exit
+			}
+			' 2>/dev/null
+		)"
+
+		set -- $scan_range
+
+		scan_start="$1"
+		scan_end="$2"
+
+		case "$scan_start" in
 			''|*[!0-9]*)
 				continue
 				;;
 		esac
 
-		#
-		# Host count.
-		#
-		case "$cidr" in
-			32)
-				start="$base_int"
-				end="$base_int"
-				;;
-
-			31)
-				start="$base_int"
-				end=$((base_int + 1))
-				;;
-
-			30)
-				start=$((base_int + 1))
-				end=$((base_int + 2))
-				;;
-
-			*)
-				#
-				# 2^(32-cidr) bez awk.
-				#
-				hosts=1
-				bits=$((32 - cidr))
-
-				while [ "$bits" -gt 0 ]; do
-					hosts=$((hosts * 2))
-					bits=$((bits - 1))
-				done
-
-				if [ "$hosts" -gt "$MAX_DISCOVERY_HOSTS" ]; then
-					hosts="$MAX_DISCOVERY_HOSTS"
-				fi
-
-				start=$((base_int + 1))
-				end=$((base_int + hosts - 2))
-
-				#
-				# Przy bardzo małej sieci.
-				#
-				[ "$end" -lt "$start" ] &&
-					end="$start"
+		case "$scan_end" in
+			''|*[!0-9]*)
+				continue
 				;;
 		esac
 
-		#
-		# Nie skanujemy więcej niż MAX_DISCOVERY_HOSTS z jednej sieci.
-		#
-		if [ "$end" -ge "$start" ]; then
+		[ "$scan_start" -le "$scan_end" ] 2>/dev/null || continue
 
-			scan_count=$((end - start + 1))
+		#
+		# ===========================================================
+		# Znajdź lokalny adres w tej sieci.
+		# ===========================================================
+		#
 
-			if [ "$scan_count" -gt "$MAX_DISCOVERY_HOSTS" ]; then
-				end=$((start + MAX_DISCOVERY_HOSTS - 1))
-			fi
+		baseaddr=""
+
+		if command -v ip >/dev/null 2>&1; then
+
+			baseaddr="$(
+				ip -4 addr show 2>/dev/null |
+				awk -v wanted="$base" -v prefix="$cidr" '
+				{
+					for (i=1; i<=NF; i++) {
+
+						if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/) {
+
+							split($i,a,"/")
+
+							ip=a[1]
+							p=a[2]
+
+							if (p != prefix)
+								continue
+
+							split(ip,b,".")
+
+							n=(b[1]*16777216)+
+							  (b[2]*65536)+
+							  (b[3]*256)+
+							  b[4]
+
+							split(wanted,c,".")
+
+							w=(c[1]*16777216)+
+							  (c[2]*65536)+
+							  (c[3]*256)+
+							  c[4]
+
+							size=2^(32-prefix)
+							net=int(n/size)*size
+
+							if (net == w) {
+								print ip
+								exit
+							}
+						}
+					}
+				}'
+			)"
 		fi
 
-		n="$start"
+		#
+		# ===========================================================
+		# Scan wszystkich hostów.
+		#
+		# WAŻNE:
+		# NIE używamy już nc jako filtra.
+		#
+		# detect_platform() wykonuje właściwą próbę SSH:
+		#   1. klucz
+		#   2. hasło
+		#
+		# Dzięki temu host nie zostanie odrzucony przez
+		# różne implementacje nc na OpenWrt.
+		# ===========================================================
+		#
 
-		while [ "$n" -le "$end" ] 2>/dev/null; do
+		scan_ip="$scan_start"
 
-			target="$(int_to_ipv4 "$n")"
+		while [ "$scan_ip" -le "$scan_end" ] 2>/dev/null; do
+
+			target="$(
+				awk -v n="$scan_ip" '
+				BEGIN {
+					a=int(n/16777216)
+					n=n-a*16777216
+
+					b=int(n/65536)
+					n=n-b*65536
+
+					c=int(n/256)
+					d=n-c*256
+
+					printf "%d.%d.%d.%d\n",a,b,c,d
+				}'
+			)"
 
 			#
-			# Nigdy nie skanuj 0.0.0.0.
+			# Nie próbuj własnego adresu.
 			#
-			[ "$target" = "0.0.0.0" ] && {
-				n=$((n + 1))
-				continue
-			}
-
-			#
-			# Nie skanuj własnych adresów LAN/VPN.
-			#
-			if grep -F -q "^${target}$" "$localipfile" 2>/dev/null; then
-				n=$((n + 1))
+			if [ "$target" = "$baseaddr" ]; then
+				scan_ip=$((scan_ip + 1))
 				continue
 			fi
 
-			count=$((count + 1))
-
 			#
-			# Bezpieczny limit całego discovery.
+			# =======================================================
+			# DIRECT SSH DETECTION
+			# =======================================================
 			#
-			if [ "$count" -gt "$MAX_DISCOVERY_HOSTS" ]; then
-				break
-			fi
 
-			discover_one_host \
-				"$target" \
-				"$port" \
-				"$username" \
-				"$password" \
-				"$hostfile"
+			REMOTE_AUTH_METHOD=""
 
-			n=$((n + 1))
+			platform="$(
+				detect_platform \
+					"$target" \
+					"$port" \
+					"$username" \
+					"$password"
+			)"
+
+			case "$platform" in
+
+				ubiquiti|openwrt|omada|generic)
+
+					#
+					# =================================================
+					# HOST -> UCI
+					# =================================================
+					#
+
+					cfg="$(
+						add_discovered_host \
+							"$target" \
+							"$platform" \
+							"$username" \
+							"$password" \
+							"$port"
+					)"
+
+					#
+					# add_discovered_host() powinno zawsze
+					# zwrócić nazwę sekcji.
+					#
+					if [ -n "$cfg" ]; then
+
+						#
+						# Jeśli wykrycie nastąpiło hasłem,
+						# natychmiast instalujemy lokalny klucz.
+						#
+						if [ "$REMOTE_AUTH_METHOD" = "password" ] &&
+						   [ -n "$password" ]; then
+
+							if install_remote_key \
+								"$platform" \
+								"$target" \
+								"$port" \
+								"$username" \
+								"$password"; then
+
+								enable_host_key "$cfg"
+							fi
+						fi
+
+						#
+						# Zapisz wynik discovery.
+						#
+						printf '%s|%s|%s\n' \
+							"$target" \
+							"$platform" \
+							"$cfg" \
+							>> "$hostfile"
+
+					fi
+					;;
+
+				*)
+					;;
+			esac
+
+			scan_ip=$((scan_ip + 1))
 
 		done
 
 	done < "$netfile"
 
-	rm -f "$localipfile"
+	#
+	# ===============================================================
+	# COMMIT UCI
+	# ===============================================================
+	#
 
-	#
-	# UCI commit dopiero po zakończeniu discovery.
-	#
 	uci commit "$CONFIG" >/dev/null 2>&1
 
 	#
-	# -----------------------------------------------------------------------
+	# ===============================================================
 	# RESULT
-	# -----------------------------------------------------------------------
+	# ===============================================================
 	#
 
 	printf '{"ok":true,"networks":['
@@ -2455,33 +2716,32 @@ rpc_discover()
 
 	first=1
 
-	if [ -f "$hostfile" ]; then
+	while IFS='|' read -r ipaddr platform cfg; do
 
-		while IFS='|' read -r target platform cfg; do
+		[ -n "$ipaddr" ] || continue
 
-			[ -n "$target" ] || continue
+		if [ "$first" -eq 0 ]; then
+			printf ','
+		fi
 
-			if [ "$first" -eq 0 ]; then
-				printf ','
-			fi
+		first=0
 
-			first=0
+		printf '{'
 
-			printf '{'
-			printf '"ipaddr":%s,' \
-				"$(json_string "$target")"
+		printf '"ipaddr":%s,' \
+			"$(json_string "$ipaddr")"
 
-			printf '"platform":%s,' \
-				"$(json_string "$platform")"
+		printf '"platform":%s,' \
+			"$(json_string "$platform")"
 
-			printf '"section":%s,' \
-				"$(json_string "$cfg")"
+		printf '"section":%s,' \
+			"$(json_string "$cfg")"
 
-			printf '"added":true'
-			printf '}'
+		printf '"added":true'
 
-		done < "$hostfile"
-	fi
+		printf '}'
+
+	done < "$hostfile"
 
 	printf ']}\n'
 
