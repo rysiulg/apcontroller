@@ -2,50 +2,34 @@
 
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 
+###############################################################################
+# APController - OpenWrt agent
 #
-# APController OpenWrt agent
+# Primary sources:
 #
-# Collects:
-#   - MAC
-#   - hostname
-#   - model
-#   - OpenWrt version
-#   - uptime
-#   - load
-#   - active WiFi channels
-#   - associated WiFi clients from hostapd ubus
+#   network.wireless status
+#   iw
+#   UCI
+#   /tmp/dhcp.leases
+#   ubus dhcp ipv4leases
+#   ubus luci-rpc getHostHints
+#   /proc/net/arp
+#   /sys/kernel/debug/ieee80211
 #
-# Output:
+# hostapd is optional.
 #
-# {
-#   "mac":"",
-#   "hostname":"",
-#   "model":"",
-#   "software":"",
-#   "uptime":0,
-#   "load":"",
-#   "channels2g":"",
-#   "channels5g":"",
-#   "channels6g":"",
-#   "clientslist2g":[],
-#   "clientslist5g":[],
-#   "clientslist6g":[]
-# }
-#
+###############################################################################
 
-#
-# ---------------------------------------------------------------------------
+
+###############################################################################
 # JSON helpers
-# ---------------------------------------------------------------------------
-#
+###############################################################################
 
 json_escape()
 {
 	printf '%s' "$1" |
 	awk '
-	BEGIN {
-		ORS=""
-	}
+	BEGIN { ORS="" }
 	{
 		gsub(/\\/, "\\\\")
 		gsub(/"/, "\\\"")
@@ -63,12 +47,6 @@ jstr()
 }
 
 
-#
-# ---------------------------------------------------------------------------
-# Safe integer
-# ---------------------------------------------------------------------------
-#
-
 jnum()
 {
 	case "$1" in
@@ -82,18 +60,70 @@ jnum()
 }
 
 
-#
-# ---------------------------------------------------------------------------
-# Basic system information
-# ---------------------------------------------------------------------------
-#
+jbool()
+{
+	case "$1" in
+		1|true|yes|on)
+			printf 'true'
+			;;
+		*)
+			printf 'false'
+			;;
+	esac
+}
+
+
+###############################################################################
+# Temporary files
+###############################################################################
+
+TMPBASE="/tmp/apcontroller-agent-openwrt.$$"
+
+LEASES="$TMPBASE.leases"
+DHCPJSON="$TMPBASE.dhcp"
+NEIGH="$TMPBASE.neigh"
+WIRELESS="$TMPBASE.wireless"
+CLIENTS="$TMPBASE.clients"
+IFACES="$TMPBASE.ifaces"
+STATION="$TMPBASE.station"
+
+cleanup()
+{
+	rm -f \
+		"$LEASES" \
+		"$DHCPJSON" \
+		"$NEIGH" \
+		"$WIRELESS" \
+		"$CLIENTS" \
+		"$IFACES" \
+		"$STATION"
+}
+
+trap cleanup EXIT INT TERM
+
+
+: > "$LEASES"
+: > "$DHCPJSON"
+: > "$NEIGH"
+: > "$WIRELESS"
+: > "$CLIENTS"
+: > "$IFACES"
+: > "$STATION"
+
+
+###############################################################################
+# BASIC SYSTEM
+###############################################################################
 
 hostname_val="$(
 	uci -q get system.@system[0].hostname 2>/dev/null
 )"
 
 [ -n "$hostname_val" ] ||
-	hostname_val="$(hostname 2>/dev/null)"
+hostname_val="$(cat /proc/sys/kernel/hostname 2>/dev/null)"
+
+[ -n "$hostname_val" ] ||
+hostname_val="$(hostname 2>/dev/null)"
 
 
 model="$(
@@ -101,622 +131,1520 @@ model="$(
 )"
 
 [ -n "$model" ] ||
-	model="$(
-		cat /proc/device-tree/model 2>/dev/null
+model="$(
+	cat /proc/device-tree/model 2>/dev/null
+)"
+
+
+software=""
+
+if [ -f /etc/openwrt_release ]; then
+
+	. /etc/openwrt_release 2>/dev/null
+
+	software="$DISTRIB_DESCRIPTION"
+
+	[ -n "$software" ] ||
+	software="$DISTRIB_ID $DISTRIB_RELEASE"
+
+fi
+
+
+if [ -z "$software" ] && [ -f /etc/os-release ]; then
+
+	software="$(
+		awk -F= '
+		/^PRETTY_NAME=/ {
+			gsub(/^"/,"",$2)
+			gsub(/"$/,"",$2)
+			print $2
+			exit
+		}' /etc/os-release
 	)"
 
-
-software="$(
-	. /etc/openwrt_release 2>/dev/null
-	printf '%s' "$DISTRIB_DESCRIPTION"
-)"
-
-[ -n "$software" ] ||
-software="$(
-	. /etc/openwrt_release 2>/dev/null
-	printf '%s %s' "$DISTRIB_ID" "$DISTRIB_RELEASE"
-)"
+fi
 
 
 uptime="$(
-	awk '
-	{
-		printf "%d", $1
-	}
-	' /proc/uptime 2>/dev/null
+	awk '{printf "%d",$1}' /proc/uptime 2>/dev/null
 )"
 
 [ -n "$uptime" ] || uptime=0
 
 
 load="$(
-	awk '
-	{
-		print $1" "$2" "$3
-	}
-	' /proc/loadavg 2>/dev/null
+	awk '{printf "%s %s %s",$1,$2,$3}' /proc/loadavg 2>/dev/null
 )"
 
 
-#
-# ---------------------------------------------------------------------------
+###############################################################################
 # MAC
-# ---------------------------------------------------------------------------
-#
+###############################################################################
 
 mac=""
 
-#
-# Prefer LAN bridge.
-#
-for dev in \
-	br-lan \
-	br0 \
-	eth0 \
-	lan
-do
+for dev in br-lan br0 eth0 eth1 lan bond0; do
 
-	[ -e "/sys/class/net/$dev/address" ] || continue
+	[ -r "/sys/class/net/$dev/address" ] || continue
 
-	mac="$(
-		cat "/sys/class/net/$dev/address" 2>/dev/null
-	)"
+	tmp="$(cat "/sys/class/net/$dev/address" 2>/dev/null)"
 
-	[ -n "$mac" ] || continue
-
-	case "$mac" in
-		00:00:00:00:00:00)
-			mac=""
+	case "$tmp" in
+		""|00:00:00:00:00:00)
 			continue
 			;;
 	esac
 
+	mac="$tmp"
 	break
 
 done
 
 
-#
-# If the usual names do not exist, use the first
-# non-loopback Ethernet/bridge interface.
-#
 if [ -z "$mac" ]; then
 
-	for addrfile in /sys/class/net/*/address; do
+	for f in /sys/class/net/*/address; do
 
-		[ -f "$addrfile" ] || continue
+		[ -r "$f" ] || continue
 
-		dev="${addrfile%/address}"
+		dev="${f%/address}"
 		dev="${dev##*/}"
 
-		[ "$dev" = "lo" ] && continue
-
-		mac="$(
-			cat "$addrfile" 2>/dev/null
-		)"
-
-		case "$mac" in
-			00:00:00:00:00:00|"")
-				mac=""
+		case "$dev" in
+			lo|docker*|veth*|sit*|tun*|wg*)
 				continue
 				;;
-			*)
-				break
+		esac
+
+		tmp="$(cat "$f" 2>/dev/null)"
+
+		case "$tmp" in
+			""|00:00:00:00:00:00)
+				continue
 				;;
 		esac
+
+		mac="$tmp"
+		break
 
 	done
 
 fi
 
 
-#
-# ---------------------------------------------------------------------------
-# WiFi channels
-# ---------------------------------------------------------------------------
-#
-# iw dev produces for example:
-#
-# phy#0
-#     Interface wlan0
-#         ...
-#         type AP
-#         channel 1 (2412 MHz), width: 20 MHz
-#
-# and:
-#
-# channel 36 (5180 MHz)
-#
-# We classify using frequency:
-#
-#   < 3000 MHz       -> 2.4 GHz
-#   < 5925 MHz       -> 5 GHz
-#   >= 5925 MHz      -> 6 GHz
-#
-# This also works with newer interface names such as:
-#
-#   phy0.0-ap0
-#   phy0.1-ap0
-#   phy0.2-ap0
-#
-# and MLO-style interfaces.
-#
+###############################################################################
+# NETWORK
+###############################################################################
 
-channels2g=""
-channels5g=""
-channels6g=""
+ipaddr=""
+netmask=""
+network_name=""
+l3_interface=""
+network_device=""
+gateway=""
+dns=""
 
 
-collect_channels()
+network_status()
 {
-	[ -x /sbin/iw ] ||
-	[ -x /usr/sbin/iw ] ||
-	command -v iw >/dev/null 2>&1 ||
-	return 0
+	ubus call "network.interface.$1" status 2>/dev/null
+}
 
-	iw dev 2>/dev/null |
-	awk '
-		/channel [0-9]+ \([0-9]+ MHz\)/ {
 
-			channel=$2
-			freq=$3
+get_ipv4_from_status()
+{
+	printf '%s' "$1" |
+	jsonfilter -q \
+		-e '@["ipv4-address"][0].address' 2>/dev/null
+}
 
-			gsub(/\(/, "", freq)
-			gsub(/MHz\)/, "", freq)
 
-			if (freq < 3000) {
-				print "2g|" channel
-			}
-			else if (freq < 5925) {
-				print "5g|" channel
-			}
-			else {
-				print "6g|" channel
-			}
-		}
-	' |
-	while IFS='|' read -r band channel; do
+if command -v ubus >/dev/null 2>&1 &&
+   command -v jsonfilter >/dev/null 2>&1
+then
 
-		[ -n "$band" ] || continue
-		[ -n "$channel" ] || continue
+	status="$(network_status lan)"
 
-		case "$band" in
+	if [ -n "$status" ]; then
 
-			2g)
-				case ",$channels2g," in
-					*,"$channel",*)
-						;;
-					*)
-						channels2g="${channels2g}${channels2g:+,}${channel}"
-						;;
-				esac
+		ipaddr="$(get_ipv4_from_status "$status")"
+
+		if [ -n "$ipaddr" ]; then
+
+			network_name="lan"
+
+			netmask="$(
+				printf '%s' "$status" |
+				jsonfilter -q \
+					-e '@["ipv4-address"][0].mask' 2>/dev/null
+			)"
+
+			l3_interface="$(
+				printf '%s' "$status" |
+				jsonfilter -q \
+					-e '@.l3_device' 2>/dev/null
+			)"
+
+			network_device="$(
+				printf '%s' "$status" |
+				jsonfilter -q \
+					-e '@.device' 2>/dev/null
+			)"
+
+			gateway="$(
+				printf '%s' "$status" |
+				jsonfilter -q \
+					-e '@.route[0].nexthop' 2>/dev/null
+			)"
+
+			dns="$(
+				printf '%s' "$status" |
+				jsonfilter -q \
+					-e '@["dns-server"][0]' 2>/dev/null
+			)"
+
+		fi
+
+	fi
+
+fi
+
+
+###############################################################################
+# NETWORK FALLBACK
+###############################################################################
+
+if [ -z "$ipaddr" ] &&
+   command -v ubus >/dev/null 2>&1 &&
+   command -v jsonfilter >/dev/null 2>&1
+then
+
+	for n in $(
+		ubus call network.interface dump 2>/dev/null |
+		jsonfilter -q \
+			-e '@.interface[*].interface' 2>/dev/null
+	); do
+
+		case "$n" in
+			wan|wan6|wan_*|wan6_*|loopback)
+				continue
 				;;
-
-			5g)
-				case ",$channels5g," in
-					*,"$channel",*)
-						;;
-					*)
-						channels5g="${channels5g}${channels5g:+,}${channel}"
-						;;
-				esac
-				;;
-
-			6g)
-				case ",$channels6g," in
-					*,"$channel",*)
-						;;
-					*)
-						channels6g="${channels6g}${channels6g:+,}${channel}"
-						;;
-				esac
-				;;
-
 		esac
+
+		status="$(network_status "$n")"
+
+		tmp_ip="$(get_ipv4_from_status "$status")"
+
+		[ -n "$tmp_ip" ] || continue
+
+		ipaddr="$tmp_ip"
+		network_name="$n"
+
+		netmask="$(
+			printf '%s' "$status" |
+			jsonfilter -q \
+				-e '@["ipv4-address"][0].mask' 2>/dev/null
+		)"
+
+		l3_interface="$(
+			printf '%s' "$status" |
+			jsonfilter -q \
+				-e '@.l3_device' 2>/dev/null
+		)"
+
+		network_device="$(
+			printf '%s' "$status" |
+			jsonfilter -q \
+				-e '@.device' 2>/dev/null
+		)"
+
+		gateway="$(
+			printf '%s' "$status" |
+			jsonfilter -q \
+				-e '@.route[0].nexthop' 2>/dev/null
+		)"
+
+		dns="$(
+			printf '%s' "$status" |
+			jsonfilter -q \
+				-e '@["dns-server"][0]' 2>/dev/null
+		)"
+
+		break
+
+	done
+
+fi
+
+
+###############################################################################
+# ROUTE FALLBACK
+###############################################################################
+
+if [ -z "$gateway" ] && command -v ip >/dev/null 2>&1; then
+
+	gateway="$(
+		ip -4 route show default 2>/dev/null |
+		awk '
+		$1=="default" {
+			for (i=1;i<=NF;i++)
+				if ($i=="via") {
+					print $(i+1)
+					exit
+				}
+		}'
+	)"
+
+fi
+
+
+###############################################################################
+# DNS FALLBACK
+###############################################################################
+
+if [ -z "$dns" ]; then
+
+	for f in \
+		/tmp/resolv.conf.d/resolv.conf.auto \
+		/etc/resolv.conf
+	do
+
+		[ -r "$f" ] || continue
+
+		dns="$(
+			awk '
+			$1=="nameserver" {
+				if (x!="")
+					x=x","
+				x=x$2
+			}
+			END {
+				print x
+			}' "$f"
+		)"
+
+		[ -n "$dns" ] && break
+
+	done
+
+fi
+
+
+###############################################################################
+# DHCP
+###############################################################################
+
+[ -r /tmp/dhcp.leases ] &&
+	cat /tmp/dhcp.leases >> "$LEASES"
+
+
+for f in /tmp/dhcp.leases.d/*; do
+
+	[ -r "$f" ] || continue
+
+	cat "$f" >> "$LEASES"
+
+done
+
+
+if command -v ubus >/dev/null 2>&1; then
+
+	ubus call dhcp ipv4leases 2>/dev/null > "$DHCPJSON"
+
+fi
+
+
+###############################################################################
+# NEIGHBOURS
+###############################################################################
+
+if command -v ip >/dev/null 2>&1; then
+
+	ip -4 neigh show 2>/dev/null > "$NEIGH"
+
+fi
+
+
+###############################################################################
+# HOST HINTS
+###############################################################################
+
+HOSTHINTS="{}"
+
+if command -v ubus >/dev/null 2>&1; then
+
+	HOSTHINTS="$(
+		ubus call luci-rpc getHostHints 2>/dev/null
+	)"
+
+fi
+
+[ -n "$HOSTHINTS" ] || HOSTHINTS="{}"
+
+
+###############################################################################
+# CLIENT IP
+###############################################################################
+
+get_client_ip()
+{
+	wanted="$1"
+
+	[ -n "$wanted" ] || return 0
+
+
+	result="$(
+		awk -v wanted="$wanted" '
+		BEGIN {
+			IGNORECASE=1
+		}
+		{
+			mac=""
+			for (i=1;i<=NF;i++) {
+				if ($i=="lladdr" && i<NF) {
+					mac=$(i+1)
+					break
+				}
+			}
+
+			if (tolower(mac)==tolower(wanted)) {
+				print $1
+				exit
+			}
+		}' "$NEIGH"
+	)"
+
+	if [ -n "$result" ]; then
+		printf '%s' "$result"
+		return
+	fi
+
+
+	result="$(
+		awk -v wanted="$wanted" '
+		BEGIN {
+			IGNORECASE=1
+		}
+		$2!="" && tolower($2)==tolower(wanted) {
+			print $3
+			exit
+		}' "$LEASES"
+	)"
+
+	printf '%s' "$result"
+}
+
+
+###############################################################################
+# CLIENT HOSTNAME
+###############################################################################
+
+get_client_hostname()
+{
+	wanted="$1"
+
+	[ -n "$wanted" ] || return 0
+
+
+	result="$(
+		awk -v wanted="$wanted" '
+		BEGIN {
+			IGNORECASE=1
+		}
+		$2!="" && tolower($2)==tolower(wanted) {
+			if ($4!="" && $4!="*" && $4!="-") {
+				print $4
+				exit
+			}
+		}' "$LEASES"
+	)"
+
+	if [ -n "$result" ]; then
+		printf '%s' "$result"
+		return
+	fi
+
+
+	if [ -s "$DHCPJSON" ] &&
+	   command -v jsonfilter >/dev/null 2>&1
+	then
+
+		result="$(
+			jsonfilter -q \
+				-i "$DHCPJSON" \
+				-e "@.*['$wanted'].name" 2>/dev/null
+		)"
+
+		if [ -n "$result" ]; then
+			printf '%s' "$result"
+			return
+		fi
+
+	fi
+
+
+	if command -v jsonfilter >/dev/null 2>&1 &&
+   [ -n "$HOSTHINTS" ]; then
+
+		result="$(
+			printf '%s' "$HOSTHINTS" |
+			jsonfilter -q \
+				-e "@['$wanted'].name" 2>/dev/null
+		)"
+
+		[ -n "$result" ] && {
+			printf '%s' "$result"
+			return
+		}
+
+		upper="$(
+			printf '%s' "$wanted" |
+			tr 'a-f' 'A-F'
+		)"
+
+		result="$(
+			printf '%s' "$HOSTHINTS" |
+			jsonfilter -q \
+				-e "@['$upper'].name" 2>/dev/null
+		)"
+
+		[ -n "$result" ] && printf '%s' "$result"
+
+	fi
+}
+
+
+###############################################################################
+# DHCP INTERFACE
+###############################################################################
+
+get_client_dhcp_interface()
+{
+	wanted="$1"
+
+	[ -n "$wanted" ] || return 0
+
+	if [ -s "$DHCPJSON" ] &&
+	   command -v jsonfilter >/dev/null 2>&1
+	then
+
+		jsonfilter -q \
+			-i "$DHCPJSON" \
+			-e "@.*['$wanted'].interface" 2>/dev/null
+
+	fi
+}
+
+
+###############################################################################
+# WIRELESS STATUS
+###############################################################################
+
+WIRELESS_STATUS=""
+
+if command -v ubus >/dev/null 2>&1; then
+
+	WIRELESS_STATUS="$(
+		ubus call network.wireless status 2>/dev/null
+	)"
+
+fi
+
+
+###############################################################################
+# WIRELESS HELPERS
+###############################################################################
+
+get_wireless_section()
+{
+	iface="$1"
+
+	[ -n "$iface" ] || return 0
+	[ -n "$WIRELESS_STATUS" ] || return 0
+
+	printf '%s' "$WIRELESS_STATUS" |
+	jsonfilter -q \
+		-e "@[*].interfaces[@.ifname='$iface'].section" \
+		2>/dev/null |
+	head -n 1
+}
+
+
+get_wireless_ssid()
+{
+	iface="$1"
+
+	section="$(get_wireless_section "$iface")"
+
+	if [ -n "$section" ]; then
+
+		uci -q get "wireless.$section.ssid" 2>/dev/null
+
+		return
+
+	fi
+
+
+	for section in $(
+		uci -q show wireless 2>/dev/null |
+		sed -n \
+			's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p'
+	); do
+
+		config_ifname="$(
+			uci -q get "wireless.$section.ifname" 2>/dev/null
+		)"
+
+		[ "$config_ifname" = "$iface" ] || continue
+
+		uci -q get "wireless.$section.ssid" 2>/dev/null
+
+		return
 
 	done
 }
 
 
-collect_channels
-
-
-#
-# ---------------------------------------------------------------------------
-# WiFi clients
-# ---------------------------------------------------------------------------
-#
-# OpenWrt hostapd exposes:
-#
-#   ubus list | grep '^hostapd\.'
-#
-# and:
-#
-#   ubus call hostapd.wlan0 get_clients
-#
-# The response contains:
-#
-# {
-#     "freq": 5260,
-#     "clients": {
-#         "aa:bb:cc:dd:ee:ff": {
-#             ...
-#             "signal": -55,
-#             "bytes": {
-#                 "rx": ...,
-#                 "tx": ...
-#             },
-#             "rate": {
-#                 "rx": ...,
-#                 "tx": ...
-#             }
-#         }
-#     }
-# }
-#
-# Therefore we collect every hostapd object separately and classify
-# its clients by frequency.
-#
-
-clients2g='[]'
-clients5g='[]'
-clients6g='[]'
-
-
-#
-# Temporary files are necessary because POSIX /bin/sh pipelines
-# execute the final while loop in a subshell on many OpenWrt systems.
-#
-
-CLIENT_TMP="${TMPDIR:-/tmp}/apcontroller-clients.$$"
-
-rm -f "$CLIENT_TMP"
-
-touch "$CLIENT_TMP" 2>/dev/null
-
-
-cleanup()
+get_wireless_network()
 {
-	rm -f "$CLIENT_TMP" 2>/dev/null
-}
+	iface="$1"
 
-trap cleanup EXIT INT TERM
+	section="$(get_wireless_section "$iface")"
+
+	if [ -n "$section" ]; then
+
+		uci -q get "wireless.$section.network" 2>/dev/null
+
+		return
+
+	fi
 
 
-#
-# ---------------------------------------------------------------------------
-# Append one JSON client to the appropriate temporary array.
-# ---------------------------------------------------------------------------
-#
+	for section in $(
+		uci -q show wireless 2>/dev/null |
+		sed -n \
+			's/^wireless\.\([^.=]*\)=wifi-iface$/\1/p'
+	); do
 
-append_client()
-{
-	local band="$1"
-	local json="$2"
+		config_ifname="$(
+			uci -q get "wireless.$section.ifname" 2>/dev/null
+		)"
 
-	[ -n "$json" ] || return 0
+		[ "$config_ifname" = "$iface" ] || continue
 
-	printf '%s\n' "$band|$json" >> "$CLIENT_TMP"
+		uci -q get "wireless.$section.network" 2>/dev/null
+
+		return
+
+	done
 }
 
 
-#
-# ---------------------------------------------------------------------------
-# Extract clients from one hostapd ubus object.
-# ---------------------------------------------------------------------------
-#
+###############################################################################
+# BAND
+###############################################################################
 
-collect_hostapd_clients()
+get_band()
 {
-	local object="$1"
+	f="$1"
 
-	local data
-	local freq
-	local band
-	local macaddr
-
-	local signal
-	local rxbytes
-	local txbytes
-	local rxrate
-	local txrate
-
-	local hostname_client
-	local connected
-
-	[ -n "$object" ] || return 0
-
-	data="$(
-		ubus call "$object" get_clients 2>/dev/null
-	)"
-
-	[ -n "$data" ] || return 0
-
-	#
-	# Must have a clients object.
-	#
-	printf '%s' "$data" |
-		jsonfilter -q -e '@.clients' >/dev/null 2>&1 ||
-	return 0
-
-	freq="$(
-		printf '%s' "$data" |
-		jsonfilter -q -e '@.freq' 2>/dev/null
-	)"
-
-	case "$freq" in
+	case "$f" in
 		''|*[!0-9]*)
-			return 0
+			printf 'unknown'
+			return
 			;;
 	esac
 
-	#
-	# Band from frequency.
-	#
-	if [ "$freq" -lt 3000 ] 2>/dev/null; then
-		band="2g"
-	elif [ "$freq" -lt 5925 ] 2>/dev/null; then
-		band="5g"
+	if [ "$f" -lt 3000 ]; then
+		printf '2g'
+	elif [ "$f" -lt 5925 ]; then
+		printf '5g'
 	else
-		band="6g"
+		printf '6g'
 	fi
-
-	#
-	# Get MAC addresses from the clients object.
-	#
-	printf '%s' "$data" |
-	grep -oE '"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"[[:space:]]*:' |
-	sed \
-		-e 's/^"//' \
-		-e 's/"[[:space:]]*:$//' |
-	while read -r macaddr; do
-
-		[ -n "$macaddr" ] || continue
-
-		#
-		# Default values.
-		#
-		signal=""
-		rxbytes=""
-		txbytes=""
-		rxrate=""
-		txrate=""
-		hostname_client=""
-		connected=1
-
-		#
-		# jsonfilter accepts the object key using ['MAC'].
-		#
-		signal="$(
-			printf '%s' "$data" |
-			jsonfilter -q -e "@.clients['$macaddr'].signal" 2>/dev/null
-		)"
-
-		rxbytes="$(
-			printf '%s' "$data" |
-			jsonfilter -q -e "@.clients['$macaddr'].bytes.rx" 2>/dev/null
-		)"
-
-		txbytes="$(
-			printf '%s' "$data" |
-			jsonfilter -q -e "@.clients['$macaddr'].bytes.tx" 2>/dev/null
-		)"
-
-		rxrate="$(
-			printf '%s' "$data" |
-			jsonfilter -q -e "@.clients['$macaddr'].rate.rx" 2>/dev/null
-		)"
-
-		txrate="$(
-			printf '%s' "$data" |
-			jsonfilter -q -e "@.clients['$macaddr'].rate.tx" 2>/dev/null
-		)"
-
-		#
-		# Some hostapd/OpenWrt versions may expose hostname
-		# information. If unavailable it simply stays empty.
-		#
-		hostname_client="$(
-			printf '%s' "$data" |
-			jsonfilter -q -e "@.clients['$macaddr'].hostname" 2>/dev/null
-		)"
-
-		#
-		# Only signal is normally guaranteed by newer hostapd.
-		#
-		case "$signal" in
-			''|*[!0-9-]*)
-				signal=0
-				;;
-		esac
-
-		case "$rxbytes" in
-			''|*[!0-9]*)
-				rxbytes=0
-				;;
-		esac
-
-		case "$txbytes" in
-			''|*[!0-9]*)
-				txbytes=0
-				;;
-		esac
-
-		case "$rxrate" in
-			''|*[!0-9]*)
-				rxrate=0
-				;;
-		esac
-
-		case "$txrate" in
-			''|*[!0-9]*)
-				txrate=0
-				;;
-		esac
-
-		#
-		# Keep the client structure stable for the frontend.
-		#
-		client_json="$(
-			printf '{'
-			printf '"mac":%s,' "$(jstr "$macaddr")"
-			printf '"hostname":%s,' "$(jstr "$hostname_client")"
-			printf '"signal":%s,' "$(jnum "$signal")"
-			printf '"rx_bytes":%s,' "$(jnum "$rxbytes")"
-			printf '"tx_bytes":%s,' "$(jnum "$txbytes")"
-			printf '"rx_rate":%s,' "$(jnum "$rxrate")"
-			printf '"tx_rate":%s,' "$(jnum "$txrate")"
-			printf '"freq":%s,' "$(jnum "$freq")"
-			printf '"band":%s,' "$(jstr "$band")"
-			printf '"connected":%s' "$connected"
-			printf '}'
-		)"
-
-		append_client "$band" "$client_json"
-
-	done
 }
 
 
+###############################################################################
+# CHANNEL
+###############################################################################
+
+freq_to_channel()
+{
+	f="$1"
+
+	case "$f" in
+		24[0-9][0-9])
+			awk -v f="$f" \
+				'BEGIN { printf "%d", (f-2407)/5 }'
+			;;
+
+		5[0-9][0-9][0-9])
+			awk -v f="$f" \
+				'BEGIN { printf "%d", (f-5000)/5 }'
+			;;
+
+		6[0-9][0-9][0-9])
+			awk -v f="$f" \
+				'BEGIN { printf "%d", (f-5950)/5 }'
+			;;
+
+		*)
+			printf '0'
+			;;
+	esac
+}
+
+
+###############################################################################
+# WIFI GENERATION
+###############################################################################
+
+get_wifi_generation()
+{
+	iface="$1"
+	client="$2"
+
+	[ -n "$iface" ] || return 0
+	[ -n "$client" ] || return 0
+
+	for capa in \
+		ht_capa \
+		vht_capa \
+		he_capa \
+		eht_capa
+	do
+
+		file=""
+
+		for f in \
+			/sys/kernel/debug/ieee80211/*/stations/"$client"/"$capa" \
+			/sys/kernel/debug/ieee80211/*/*/stations/"$client"/"$capa"
+		do
+			[ -r "$f" ] || continue
+			file="$f"
+			break
+		done
+
+		[ -n "$file" ] || continue
+
+		case "$capa" in
+			eht_capa)
+				printf '7'
+				return
+				;;
+			he_capa)
+				printf '6'
+				return
+				;;
+			vht_capa)
+				printf '5'
+				return
+				;;
+			ht_capa)
+				printf '4'
+				return
+				;;
+		esac
+
+	done
+
+	printf '0'
+}
+
+
+###############################################################################
+# STATION FIELD HELPERS
+###############################################################################
+
+station_value()
+{
+	iface="$1"
+	wanted="$2"
+	kind="$3"
+
+	iw dev "$iface" station dump 2>/dev/null |
+	awk -v wanted="$wanted" -v kind="$kind" '
+	BEGIN {
+		IGNORECASE=1
+		found=0
+	}
+
+	/^Station / {
+		found=(tolower($2)==tolower(wanted))
+		next
+	}
+
+	!found {
+		next
+	}
+
+	kind=="rx_bytes" &&
+	$1=="rx" && $2=="bytes:" {
+		print $3
+		exit
+	}
+
+	kind=="tx_bytes" &&
+	$1=="tx" && $2=="bytes:" {
+		print $3
+		exit
+	}
+
+	kind=="rx_packets" &&
+	$1=="rx" && $2=="packets:" {
+		print $3
+		exit
+	}
+
+	kind=="tx_packets" &&
+	$1=="tx" && $2=="packets:" {
+		print $3
+		exit
+	}
+
+	kind=="signal" &&
+	$1=="signal:" {
+		gsub(/dBm/,"",$2)
+		print $2
+		exit
+	}
+
+	kind=="connected" &&
+	$1=="connected" && $2=="time:" {
+		print $3
+		exit
+	}
+
+	kind=="rx_rate" &&
+	$1=="rx" && $2=="bitrate:" {
+		$1=""
+		$2=""
+		sub(/^[ \t]+/,"")
+		print
+		exit
+	}
+
+	kind=="tx_rate" &&
+	$1=="tx" && $2=="bitrate:" {
+		$1=""
+		$2=""
+		sub(/^[ \t]+/,"")
+		print
+		exit
+	}
+	'
+}
+
+
+###############################################################################
+# RATE
+###############################################################################
+
+rate_to_kbit()
+{
+	value="$1"
+
+	[ -n "$value" ] || {
+		printf '0'
+		return
+	}
+
+	awk -v s="$value" '
+	BEGIN {
+
+		n=s
+
+		sub(/^[ \t]+/,"",n)
+		sub(/[ \t].*$/,"",n)
+
+		if (s ~ /Gbit|GBit/)
+			printf "%d",n*1000000
+
+		else if (s ~ /Mbit|MBit/)
+			printf "%d",n*1000
+
+		else if (s ~ /Kbit|KBit/)
+			printf "%d",n
+
+		else
+			printf "%d",n
+	}'
+}
+
+
+###############################################################################
+# HOSTAPD STATUS
+###############################################################################
+
+hostapd_status()
+{
+	object="$1"
+
+	ubus call "$object" get_status 2>/dev/null
+}
+
+
+hostapd_clients()
+{
+	object="$1"
+
+	ubus call "$object" get_clients 2>/dev/null
+}
+
+
+###############################################################################
+# INTERFACE INFO
+###############################################################################
+
+get_iface_freq()
+{
+	iface="$1"
+
+	iw dev "$iface" info 2>/dev/null |
+	awk '
+	/channel [0-9]+ \([0-9]+ MHz\)/ {
+
+		f=$3
+
+		gsub(/\(/,"",f)
+		gsub(/MHz\)/,"",f)
+
+		print f
+		exit
+	}'
+}
+
+
+get_iface_channel()
+{
+	iface="$1"
+
+	iw dev "$iface" info 2>/dev/null |
+	awk '
+	/channel [0-9]+ \([0-9]+ MHz\)/ {
+
+		print $2
+		exit
+	}'
+}
+
+
+get_iface_bssid()
+{
+	iface="$1"
+
+	iw dev "$iface" info 2>/dev/null |
+	awk '
+	$1=="addr" {
+		print $2
+		exit
+	}'
+}
+
+
+###############################################################################
+# CLIENT APPEND
+###############################################################################
+
+append_client()
+{
+	printf '%s|%s\n' "$1" "$2" >> "$CLIENTS"
+}
+
+
+###############################################################################
+# COLLECT CLIENT
+###############################################################################
+
+collect_client()
+{
+	band="$1"
+	iface="$2"
+	client_mac="$3"
+
+	[ -n "$iface" ] || return
+	[ -n "$client_mac" ] || return
+
+
+	############################################################################
+	# DUPLICATE CHECK
+	############################################################################
+
+	if grep -qi \
+		"\"mac\":\"$client_mac\"" \
+		"$CLIENTS" 2>/dev/null
+	then
+		return
+	fi
+
+
+	############################################################################
+	# BASIC
+	############################################################################
+
+	ssid="$(get_wireless_ssid "$iface")"
+
+	network_for_iface="$(
+		get_wireless_network "$iface"
+	)"
+
+
+	freq="$(get_iface_freq "$iface")"
+
+	case "$freq" in
+		''|*[!0-9]*)
+			freq=0
+			;;
+	esac
+
+
+	channel="$(get_iface_channel "$iface")"
+
+	case "$channel" in
+		''|*[!0-9]*)
+			channel="$(freq_to_channel "$freq")"
+			;;
+	esac
+
+
+	bssid="$(get_iface_bssid "$iface")"
+
+
+	############################################################################
+	# STATION
+	############################################################################
+
+	signal="$(
+		station_value "$iface" "$client_mac" signal
+	)"
+
+	rx_bytes="$(
+		station_value "$iface" "$client_mac" rx_bytes
+	)"
+
+	tx_bytes="$(
+		station_value "$iface" "$client_mac" tx_bytes
+	)"
+
+	rx_packets="$(
+		station_value "$iface" "$client_mac" rx_packets
+	)"
+
+	tx_packets="$(
+		station_value "$iface" "$client_mac" tx_packets
+	)"
+
+	connected_time="$(
+		station_value "$iface" "$client_mac" connected
+	)"
+
+	rx_rate_raw="$(
+		station_value "$iface" "$client_mac" rx_rate
+	)"
+
+	tx_rate_raw="$(
+		station_value "$iface" "$client_mac" tx_rate
+	)"
+
+	rx_rate="$(rate_to_kbit "$rx_rate_raw")"
+	tx_rate="$(rate_to_kbit "$tx_rate_raw")"
+
+
+	############################################################################
+	# CLIENT NETWORK
+	############################################################################
+
+	client_ip="$(get_client_ip "$client_mac")"
+
+	client_hostname="$(
+		get_client_hostname "$client_mac"
+	)"
+
+	dhcp_interface="$(
+		get_client_dhcp_interface "$client_mac"
+	)"
+
+
+	############################################################################
+	# WIFI GENERATION
+	############################################################################
+
+	wifi="$(
+		get_wifi_generation "$iface" "$client_mac"
+	)"
+
+
+	############################################################################
+	# DEFAULTS
+	############################################################################
+
+	case "$signal" in
+		''|*[!0-9-]*)
+			signal=0
+			;;
+	esac
+
+	case "$rx_bytes" in
+		''|*[!0-9]*)
+			rx_bytes=0
+			;;
+	esac
+
+	case "$tx_bytes" in
+		''|*[!0-9]*)
+			tx_bytes=0
+			;;
+	esac
+
+	case "$rx_packets" in
+		''|*[!0-9]*)
+			rx_packets=0
+			;;
+	esac
+
+	case "$tx_packets" in
+		''|*[!0-9]*)
+			tx_packets=0
+			;;
+	esac
+
+	case "$rx_rate" in
+		''|*[!0-9]*)
+			rx_rate=0
+			;;
+	esac
+
+	case "$tx_rate" in
+		''|*[!0-9]*)
+			tx_rate=0
+			;;
+	esac
+
+	case "$connected_time" in
+		''|*[!0-9]*)
+			connected_time=0
+			;;
+	esac
+
+
+	############################################################################
+	# CLIENT JSON
+	############################################################################
+
+	client_json="$(
+		printf '{'
+
+		printf '"mac":%s,' "$(jstr "$client_mac")"
+		printf '"ipaddr":%s,' "$(jstr "$client_ip")"
+		printf '"name":%s,' "$(jstr "$client_hostname")"
+		printf '"hostname":%s,' "$(jstr "$client_hostname")"
+
+		printf '"ssid":%s,' "$(jstr "$ssid")"
+		printf '"network":%s,' "$(jstr "$network_for_iface")"
+		printf '"dhcp_interface":%s,' "$(jstr "$dhcp_interface")"
+
+		printf '"interface":%s,' "$(jstr "$iface")"
+		printf '"bssid":%s,' "$(jstr "$bssid")"
+
+		printf '"channel":%s,' "$(jnum "$channel")"
+		printf '"freq":%s,' "$(jnum "$freq")"
+		printf '"band":%s,' "$(jstr "$band")"
+
+		printf '"signal":%s,' "$(jnum "$signal")"
+
+		printf '"rx":%s,' "$(jnum "$rx_bytes")"
+		printf '"tx":%s,' "$(jnum "$tx_bytes")"
+
+		printf '"rx_bytes":%s,' "$(jnum "$rx_bytes")"
+		printf '"tx_bytes":%s,' "$(jnum "$tx_bytes")"
+
+		printf '"rx_packets":%s,' "$(jnum "$rx_packets")"
+		printf '"tx_packets":%s,' "$(jnum "$tx_packets")"
+
+		printf '"rx_rate":%s,' "$(jnum "$rx_rate")"
+		printf '"tx_rate":%s,' "$(jnum "$tx_rate")"
+
+		printf '"connected":true,'
+		printf '"connected_time":%s,' "$(jnum "$connected_time")"
+
+		printf '"auth":true,'
+		printf '"assoc":true,'
+		printf '"authorized":true,'
+
+		printf '"wmm":false,'
+		printf '"ht":false,'
+		printf '"vht":false,'
+		printf '"he":false,'
+		printf '"eht":false,'
+		printf '"mfp":false,'
+
+		printf '"wifi":%s' "$(jnum "$wifi")"
+
+		printf '}'
+	)"
+
+
+	append_client "$band" "$client_json"
+}
+
+
+###############################################################################
+# COLLECT CLIENTS DIRECTLY FROM IW
 #
-# ---------------------------------------------------------------------------
-# Enumerate hostapd ubus objects.
-# ---------------------------------------------------------------------------
+# THIS IS THE PRIMARY CLIENT SOURCE.
+###############################################################################
+
+if command -v iw >/dev/null 2>&1; then
+
+	iw dev 2>/dev/null |
+	awk '
+	$1=="Interface" {
+		print $2
+	}' > "$IFACES"
+
+
+	while read -r iface; do
+
+		[ -n "$iface" ] || continue
+
+		case "$iface" in
+			mon*|*mon)
+				continue
+				;;
+		esac
+
+
+		freq="$(get_iface_freq "$iface")"
+
+		case "$freq" in
+			''|*[!0-9]*)
+				continue
+				;;
+		esac
+
+
+		band="$(get_band "$freq")"
+
+		case "$band" in
+			2g|5g|6g)
+				;;
+			*)
+				continue
+				;;
+		esac
+
+
+		iw dev "$iface" station dump 2>/dev/null |
+		awk '
+		/^Station / {
+			print $2
+		}' > "$STATION"
+
+
+		while read -r station_mac; do
+
+			[ -n "$station_mac" ] || continue
+
+			collect_client \
+				"$band" \
+				"$iface" \
+				"$station_mac"
+
+		done < "$STATION"
+
+	done < "$IFACES"
+
+fi
+
+
+###############################################################################
+# HOSTAPD SUPPLEMENT
 #
+# If iw does not see something but hostapd does, try hostapd.
+###############################################################################
 
 if command -v ubus >/dev/null 2>&1 &&
-   command -v jsonfilter >/dev/null 2>&1; then
+   command -v jsonfilter >/dev/null 2>&1
+then
 
-	#
-	# Typical output:
-	#
-	# hostapd.wlan0
-	# hostapd.wlan1
-	# hostapd.wlan2
-	#
-	# We also support modern names such as:
-	#
-	# hostapd.phy0-ap0
-	#
 	for object in $(
 		ubus list 2>/dev/null |
 		sed -n 's/^\(hostapd\.[^ ]*\)$/\1/p'
 	); do
 
-		collect_hostapd_clients "$object"
+		iface="${object#hostapd.}"
+
+		[ -n "$iface" ] || continue
+
+
+		status="$(
+			hostapd_status "$object"
+		)"
+
+		[ -n "$status" ] || continue
+
+
+		freq="$(
+			printf '%s' "$status" |
+			jsonfilter -q -e '@.freq' 2>/dev/null
+		)"
+
+		case "$freq" in
+			''|*[!0-9]*)
+				freq="$(get_iface_freq "$iface")"
+				;;
+		esac
+
+
+		case "$freq" in
+			''|*[!0-9]*)
+				continue
+				;;
+		esac
+
+
+		band="$(get_band "$freq")"
+
+
+		clients="$(
+			hostapd_clients "$object"
+		)"
+
+		[ -n "$clients" ] || continue
+
+
+		#
+		# Extract MACs from object keys.
+		#
+
+		for station_mac in $(
+			printf '%s' "$clients" |
+			grep -oE \
+				'"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"[[:space:]]*:' |
+			sed \
+				-e 's/^"//' \
+				-e 's/"[[:space:]]*:$//' |
+			sort -u
+		); do
+
+			[ -n "$station_mac" ] || continue
+
+			collect_client \
+				"$band" \
+				"$iface" \
+				"$station_mac"
+
+		done
 
 	done
 
 fi
 
 
-#
-# ---------------------------------------------------------------------------
-# Build final client arrays.
-# ---------------------------------------------------------------------------
-#
+###############################################################################
+# CHANNELS / SSIDS
+###############################################################################
 
-clients2g='['
-clients5g='['
-clients6g='['
+channels2g=""
+channels5g=""
+channels6g=""
 
-first2g=1
-first5g=1
-first6g=1
+ssid2g=""
+ssid5g=""
+ssid6g=""
 
-if [ -s "$CLIENT_TMP" ]; then
 
-	while IFS='|' read -r band client_json; do
+###############################################################################
+# Read interfaces WITHOUT pipeline subshell.
+###############################################################################
 
-		[ -n "$band" ] || continue
-		[ -n "$client_json" ] || continue
+if command -v iw >/dev/null 2>&1; then
+
+	while read -r iface; do
+
+		[ -n "$iface" ] || continue
+
+
+		freq="$(get_iface_freq "$iface")"
+
+		case "$freq" in
+			''|*[!0-9]*)
+				continue
+				;;
+		esac
+
+
+		channel="$(get_iface_channel "$iface")"
+
+		case "$channel" in
+			''|*[!0-9]*)
+				channel="$(freq_to_channel "$freq")"
+				;;
+		esac
+
+
+		band="$(get_band "$freq")"
+
+		ssid="$(get_wireless_ssid "$iface")"
+
 
 		case "$band" in
 
 			2g)
 
-				if [ "$first2g" -eq 0 ]; then
-					clients2g="${clients2g},"
-				fi
+				[ -n "$channel" ] && {
+					case ",$channels2g," in
+						*,"$channel",*)
+							;;
+						*)
+							channels2g="${channels2g}${channels2g:+,}${channel}"
+							;;
+					esac
+				}
 
-				clients2g="${clients2g}${client_json}"
-				first2g=0
+				[ -n "$ssid" ] &&
+					[ -z "$ssid2g" ] &&
+					ssid2g="$ssid"
+
 				;;
 
 			5g)
 
-				if [ "$first5g" -eq 0 ]; then
-					clients5g="${clients5g},"
-				fi
+				[ -n "$channel" ] && {
+					case ",$channels5g," in
+						*,"$channel",*)
+							;;
+						*)
+							channels5g="${channels5g}${channels5g:+,}${channel}"
+							;;
+					esac
+				}
 
-				clients5g="${clients5g}${client_json}"
-				first5g=0
+				[ -n "$ssid" ] &&
+					[ -z "$ssid5g" ] &&
+					ssid5g="$ssid"
+
 				;;
 
 			6g)
 
-				if [ "$first6g" -eq 0 ]; then
-					clients6g="${clients6g},"
-				fi
+				[ -n "$channel" ] && {
+					case ",$channels6g," in
+						*,"$channel",*)
+							;;
+						*)
+							channels6g="${channels6g}${channels6g:+,}${channel}"
+							;;
+					esac
+				}
 
-				clients6g="${clients6g}${client_json}"
-				first6g=0
+				[ -n "$ssid" ] &&
+					[ -z "$ssid6g" ] &&
+					ssid6g="$ssid"
+
 				;;
 
 		esac
 
-	done < "$CLIENT_TMP"
+	done < "$IFACES"
 
 fi
+
+
+###############################################################################
+# Arrays
+###############################################################################
+
+clients2g="["
+clients5g="["
+clients6g="["
+
+first2g=1
+first5g=1
+first6g=1
+
+
+while IFS='|' read -r band client_json; do
+
+	[ -n "$client_json" ] || continue
+
+	case "$band" in
+
+		2g)
+
+			[ "$first2g" -eq 0 ] &&
+				clients2g="${clients2g},"
+
+			clients2g="${clients2g}${client_json}"
+			first2g=0
+			;;
+
+		5g)
+
+			[ "$first5g" -eq 0 ] &&
+				clients5g="${clients5g},"
+
+			clients5g="${clients5g}${client_json}"
+			first5g=0
+			;;
+
+		6g)
+
+			[ "$first6g" -eq 0 ] &&
+				clients6g="${clients6g},"
+
+			clients6g="${clients6g}${client_json}"
+			first6g=0
+			;;
+
+	esac
+
+done < "$CLIENTS"
+
 
 clients2g="${clients2g}]"
 clients5g="${clients5g}]"
 clients6g="${clients6g}]"
 
 
-#
-# ---------------------------------------------------------------------------
-# Output
-# ---------------------------------------------------------------------------
-#
+###############################################################################
+# FINAL JSON
+###############################################################################
 
 printf '{'
 
-printf '"mac":%s,' \
-	"$(jstr "$mac")"
+printf '"platform":"openwrt",'
 
-printf '"hostname":%s,' \
-	"$(jstr "$hostname_val")"
+printf '"mac":%s,' "$(jstr "$mac")"
+printf '"hostname":%s,' "$(jstr "$hostname_val")"
+printf '"model":%s,' "$(jstr "$model")"
+printf '"software":%s,' "$(jstr "$software")"
 
-printf '"model":%s,' \
-	"$(jstr "$model")"
+printf '"uptime":%s,' "$(jnum "$uptime")"
+printf '"load":%s,' "$(jstr "$load")"
 
-printf '"software":%s,' \
-	"$(jstr "$software")"
+printf '"ipaddr":%s,' "$(jstr "$ipaddr")"
+printf '"netmask":%s,' "$(jstr "$netmask")"
 
-printf '"uptime":%s,' \
-	"$(jnum "$uptime")"
+printf '"network":%s,' "$(jstr "$network_name")"
+printf '"interface":%s,' "$(jstr "$l3_interface")"
+printf '"device":%s,' "$(jstr "$network_device")"
 
-printf '"load":%s,' \
-	"$(jstr "$load")"
+printf '"gateway":%s,' "$(jstr "$gateway")"
+printf '"dns":%s,' "$(jstr "$dns")"
 
-printf '"channels2g":%s,' \
-	"$(jstr "$channels2g")"
+printf '"channels2g":%s,' "$(jstr "$channels2g")"
+printf '"channels5g":%s,' "$(jstr "$channels5g")"
+printf '"channels6g":%s,' "$(jstr "$channels6g")"
 
-printf '"channels5g":%s,' \
-	"$(jstr "$channels5g")"
+printf '"ssid2g":%s,' "$(jstr "$ssid2g")"
+printf '"ssid5g":%s,' "$(jstr "$ssid5g")"
+printf '"ssid6g":%s,' "$(jstr "$ssid6g")"
 
-printf '"channels6g":%s,' \
-	"$(jstr "$channels6g")"
-
-printf '"clientslist2g":%s,' \
-	"$clients2g"
-
-printf '"clientslist5g":%s,' \
-	"$clients5g"
-
-printf '"clientslist6g":%s' \
-	"$clients6g"
+printf '"clientslist2g":%s,' "$clients2g"
+printf '"clientslist5g":%s,' "$clients5g"
+printf '"clientslist6g":%s' "$clients6g"
 
 printf '}\n'
 
