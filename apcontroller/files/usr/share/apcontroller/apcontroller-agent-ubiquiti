@@ -1,139 +1,104 @@
-#!/bin/sh
-
 #
-# APController Ubiquiti legacy UniFi agent
+# Find active channel for radio from vap_table.
 #
-# Works without OpenWrt/libubox/jshn.
-# Tested target family: UniFi 3.x / UAP-LRv2 style firmware.
+# Legacy UniFi:
+#   ng = 2.4 GHz
+#   na = 5 GHz
 #
-
-json_escape()
-{
-        printf '%s' "$1" |
-        awk '
-        BEGIN { ORS="" }
-        {
-                gsub(/\\/, "\\\\")
-                gsub(/"/, "\\\"")
-                gsub(/\t/, "\\t")
-                gsub(/\r/, "\\r")
-                gsub(/\n/, "\\n")
-                printf "%s", $0
-        }'
-}
-
-json_string()
-{
-        printf '"%s"' "$(json_escape "$1")"
-}
-
-json_number()
-{
-        case "$1" in
-                ''|*[!0-9-]*)
-                        printf '0'
-                        ;;
-                *)
-                        printf '%s' "$1"
-                        ;;
-        esac
-}
-
-
-DUMP="$(mca-dump 2>/dev/null)"
-
-#
-# Basic information
+# IMPORTANT:
+# Do NOT use radio_table.scan_table here.
+# scan_table contains channels of neighbouring APs.
+# The active AP channel is present in vap_table.
 #
 
-MODEL="$(printf '%s\n' "$DUMP" |
-        awk -F'"' '/"model_display"[[:space:]]*:/ {
-                print $4
-                exit
-        }')"
-
-[ -n "$MODEL" ] || MODEL="$(
-        mca-cli-op info 2>/dev/null |
-        awk -F': *' '/^Model:/ {
-                print $2
-                exit
-        }'
-)"
-
-VERSION="$(printf '%s\n' "$DUMP" |
-        awk -F'"' '/"version"[[:space:]]*:/ {
-                print $4
-                exit
-        }')"
-
-[ -n "$VERSION" ] || VERSION="$(
-        mca-cli-op info 2>/dev/null |
-        awk -F': *' '/^Version:/ {
-                print $2
-                exit
-        }'
-)"
-
-MAC="$(printf '%s\n' "$DUMP" |
-        awk -F'"' '/"mac"[[:space:]]*:/ {
-                print $4
-                exit
-        }')"
-
-[ -n "$MAC" ] || MAC="$(
-        mca-cli-op info 2>/dev/null |
-        awk -F': *' '/^MAC Address:/ {
-                print $2
-                exit
-        }'
-)"
-
-HOSTNAME="$(printf '%s\n' "$DUMP" |
-        awk -F'"' '/"hostname"[[:space:]]*:/ {
-                print $4
-                exit
-        }')"
-
-UPTIME="$(printf '%s\n' "$DUMP" |
-        awk '/"uptime"[[:space:]]*:/ {
-                gsub(/[^0-9]/, "", $0)
-                print
-                exit
-        }')"
-
-[ -n "$UPTIME" ] || UPTIME=0
-
-
-#
-# Find channel for radio.
-#
 radio_channel()
 {
-        local radio="$1"
+        local RADIO="$1"
 
-        awk -v radio="$radio" '
-        /"radio"[[:space:]]*:/ {
-                r=$0
-                gsub(/.*"radio"[[:space:]]*:[[:space:]]*"/, "", r)
-                gsub(/".*/, "", r)
-
-                if (r == radio)
-                        active=1
-                else
-                        active=0
+        [ -n "$RADIO" ] || {
+                printf '0'
+                return
         }
 
-        active && /"channel"[[:space:]]*:/ {
-                x=$0
-                gsub(/[^0-9]/, "", x)
-                if (x != "") {
-                        print x
+        printf '%s\n' "$DUMP" |
+        awk -v target="$RADIO" '
+        BEGIN {
+                RS=""
+                found=0
+        }
+
+        {
+                data=$0
+
+                #
+                # Extract vap_table.
+                #
+                p=index(data, "\"vap_table\"")
+                if (!p)
                         exit
+
+                data=substr(data,p)
+
+                #
+                # Each VAP object contains:
+                #
+                # "channel":11,...,"radio":"ng"
+                #
+                # or
+                #
+                # "channel":153,...,"radio":"na"
+                #
+                # We do not use radio_table here.
+                #
+
+                while (match(data,
+                        /\{[^{}]*"channel"[[:space:]]*:[[:space:]]*[0-9]+[^{}]*"radio"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+
+                        obj=substr(data,RSTART,RLENGTH)
+
+                        radio=""
+                        channel=""
+
+                        x=obj
+
+                        if (match(x,
+                            /"radio"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+
+                                r=substr(x,RSTART,RLENGTH)
+
+                                sub(/^.*"radio"[[:space:]]*:[[:space:]]*"/,"",r)
+                                sub(/".*$/,"",r)
+
+                                radio=r
+                        }
+
+                        x=obj
+
+                        if (match(x,
+                            /"channel"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+
+                                c=substr(x,RSTART,RLENGTH)
+
+                                sub(/^.*"channel"[[:space:]]*:[[:space:]]*/,"",c)
+                                sub(/[^0-9].*$/,"",c)
+
+                                channel=c
+                        }
+
+                        if (radio == target && channel != "") {
+                                print channel
+                                found=1
+                                exit
+                        }
+
+                        data=substr(data,RSTART+RLENGTH)
                 }
         }
-        ' <<EOF2
-$DUMP
-EOF2
+
+        END {
+                if (!found)
+                        print 0
+        }'
 }
 
 
@@ -141,220 +106,24 @@ CHANNEL2G="$(radio_channel ng)"
 CHANNEL5G="$(radio_channel na)"
 CHANNEL6G="$(radio_channel 6g)"
 
-
 #
-# Collect clients from vap_table.
-#
-# We generate arrays directly because legacy UniFi has no jshn.
+# Normalize.
 #
 
-clients_for_radio()
-{
-        local RADIO="$1"
+case "$CHANNEL2G" in
+        ''|*[!0-9]*)
+                CHANNEL2G=0
+                ;;
+esac
 
-        awk -v target="$RADIO" '
-        function esc(s) {
-                gsub(/\\/, "\\\\", s)
-                gsub(/"/, "\\\"", s)
-                return s
-        }
+case "$CHANNEL5G" in
+        ''|*[!0-9]*)
+                CHANNEL5G=0
+                ;;
+esac
 
-        function getstr(line, key,    x) {
-                x=line
-                sub(".*\"" key "\"[[:space:]]*:[[:space:]]*\"", "", x)
-                sub("\".*", "", x)
-                return x
-        }
-
-        function getnum(line, key,    x) {
-                x=line
-                sub(".*\"" key "\"[[:space:]]*:[[:space:]]*", "", x)
-                sub("[^0-9-].*", "", x)
-                return x
-        }
-
-        /"radio"[[:space:]]*:/ {
-                radio=getstr($0, "radio")
-                inradio=(radio == target)
-        }
-
-        inradio && /"essid"[[:space:]]*:/ {
-                ssid=getstr($0, "essid")
-        }
-
-        inradio && /"sta_table"[[:space:]]*:/ {
-                instations=1
-        }
-
-        instations && /"mac"[[:space:]]*:/ {
-                mac=getstr($0, "mac")
-
-                if (mac !~ /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/)
-                        next
-
-                if (mac == "")
-                        next
-
-                clientmac=mac
-                clientssid=ssid
-                rx=0
-                tx=0
-                signal=0
-                ip=""
-                hostname=""
-                connected=0
-                wifi=0
-
-                inclient=1
-        }
-
-        inclient && /"rx_bytes"[[:space:]]*:/ {
-                rx=getnum($0, "rx_bytes")
-        }
-
-        inclient && /"tx_bytes"[[:space:]]*:/ {
-                tx=getnum($0, "tx_bytes")
-        }
-
-        inclient && /"uptime"[[:space:]]*:/ {
-                connected=getnum($0, "uptime")
-        }
-
-        inclient && /"signal"[[:space:]]*:/ {
-                signal=getnum($0, "signal")
-        }
-
-        inclient && /"ip"[[:space:]]*:/ {
-                ip=getstr($0, "ip")
-        }
-
-        inclient && /"hostname"[[:space:]]*:/ {
-                hostname=getstr($0, "hostname")
-        }
-
-        inclient && /"is_11n"[[:space:]]*:[[:space:]]*true/ {
-                wifi=4
-        }
-
-        inclient && /"is_11ac"[[:space:]]*:[[:space:]]*true/ {
-                wifi=5
-        }
-
-        inclient && /^[[:space:]]*}[,]*$/ {
-                if (clientmac != "") {
-                        printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n",
-                                clientssid,
-                                clientmac,
-                                tx+0,
-                                rx+0,
-                                signal+0,
-                                connected+0,
-                                wifi+0,
-                                ip,
-                                hostname,
-                                radio
-                }
-
-                clientmac=""
-                inclient=0
-        }
-        ' <<EOF2
-$DUMP
-EOF2
-}
-
-
-#
-# JSON output
-#
-
-[ -n "$VERSION" ] &&
-        VERSION="Ubiquiti UniFi $VERSION"
-        
-printf '{'
-
-printf '"platform":"ubiquiti",'
-printf '"mac":%s,' "$(json_string "$MAC")"
-printf '"hostname":%s,' "$(json_string "$HOSTNAME")"
-printf '"model":%s,' "$(json_string "$MODEL")"
-printf '"software":%s,' "$(json_string "$VERSION")"
-printf '"uptime":%s,' "$(json_number "$UPTIME")"
-
-#
-# Load average from mca-dump.
-#
-LOAD="$(
-        printf '%s\n' "$DUMP" |
-        awk -F'"' '
-        /"loadavg_1"/ { a=$4 }
-        /"loadavg_5"/ { b=$4 }
-        /"loadavg_15"/ { c=$4 }
-        END {
-                if (a != "")
-                        print a " " b " " c
-        }'
-)"
-
-printf '"load":%s,' "$(json_string "$LOAD")"
-
-printf '"channels2g":%s,' "$(json_string "$CHANNEL2G")"
-printf '"channels5g":%s,' "$(json_string "$CHANNEL5G")"
-printf '"channels6g":%s,' "$(json_string "$CHANNEL6G")"
-
-
-#
-# Client arrays.
-#
-
-FIRST_ARRAY=1
-
-for BAND in 2g 5g 6g; do
-
-        case "$BAND" in
-                2g)
-                        RADIO="ng"
-                        ;;
-                5g)
-                        RADIO="na"
-                        ;;
-                6g)
-                        RADIO="6g"
-                        ;;
-        esac
-
-        [ "$FIRST_ARRAY" -eq 0 ] && printf ','
-        FIRST_ARRAY=0
-
-        printf '"clientslist%s":[' "$BAND"
-
-        FIRST=1
-
-        clients_for_radio "$RADIO" |
-        while IFS='|' read -r SSID CMAC TX RX SIGNAL CONNECTED WIFI IP NAME RADIO2; do
-
-                [ -n "$CMAC" ] || continue
-
-                [ "$FIRST" -eq 0 ] && printf ','
-                FIRST=0
-
-                printf '{'
-                printf '"ssid":%s,' "$(json_string "$SSID")"
-                printf '"mac":%s,' "$(json_string "$CMAC")"
-                printf '"tx":%s,' "$(json_number "$TX")"
-                printf '"rx":%s,' "$(json_number "$RX")"
-                printf '"signal":%s,' "$(json_number "$SIGNAL")"
-                printf '"connected":%s,' "$(json_number "$CONNECTED")"
-                printf '"wifi":%s,' "$(json_number "$WIFI")"
-                printf '"ipaddr":%s,' "$(json_string "$IP")"
-                printf '"name":%s' "$(json_string "$NAME")"
-                printf '}'
-
-        done
-
-        printf ']'
-
-done
-
-printf '}\n'
-
-exit 0
+case "$CHANNEL6G" in
+        ''|*[!0-9]*)
+                CHANNEL6G=0
+                ;;
+esac
