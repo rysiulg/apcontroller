@@ -1,58 +1,13 @@
 #!/bin/sh
+
 #
 # (c) 2025-2026 Cezary Jackiewicz <cezary@eko.one.pl>
 #
 
-. /usr/share/libubox/jshn.sh 2>/dev/null
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 
-json_init
-
-
-#
-# Helpers
-#
-
-get_mac()
-{
-	local IF
-
-	for IF in br-lan br0 eth0 eth1 bond0; do
-		if [ -r "/sys/class/net/$IF/address" ]; then
-			cat "/sys/class/net/$IF/address"
-			return
-		fi
-	done
-
-	for IF in /sys/class/net/*; do
-		[ -r "$IF/address" ] || continue
-		case "$(basename "$IF")" in
-			lo|docker*|veth*|sit*|tun*|wg*)
-				continue
-				;;
-		esac
-		cat "$IF/address"
-		return
-	done
-}
-
-
-get_hostname()
-{
-	cat /proc/sys/kernel/hostname 2>/dev/null ||
-		hostname 2>/dev/null
-}
-
-
-get_uptime()
-{
-	awk '{printf "%d", $1}' /proc/uptime 2>/dev/null
-}
-
-
-get_load()
-{
-	awk '{printf "%s %s %s", $1, $2, $3}' /proc/loadavg 2>/dev/null
-}
+AGENT_DIR="/usr/bin"
+UBUS_EVENT="apcontroller"
 
 
 #
@@ -61,555 +16,116 @@ get_load()
 
 detect_platform()
 {
-	if [ -f /etc/openwrt_release ] ||
-	   [ -f /etc/openwrt_version ] ||
-	   command -v ubus >/dev/null 2>&1; then
-		echo "openwrt"
-		return
-	fi
-
+	#
+	# Ubiquiti / UniFi
+	#
 	if command -v mca-dump >/dev/null 2>&1 ||
 	   command -v mca-cli-op >/dev/null 2>&1 ||
 	   [ -f /etc/ubnt_version ]; then
 		echo "ubiquiti"
-		return
+		return 0
 	fi
 
+
+	#
+	# TP-Link Omada
+	#
 	if command -v cliclientd >/dev/null 2>&1 ||
 	   [ -d /etc/omada ] ||
 	   [ -d /etc/tplink ]; then
 		echo "omada"
-		return
-	fi
-
-	echo "unknown"
-}
-
-
-#
-# OpenWrt
-#
-
-collect_openwrt()
-{
-	local BAND CHANNELS IFNAMES FILTER
-	local LEASEFILE HOSTHINTS WIRELESSSTATUS
-	local IFNAME SSID STATION
-	local _MAC
-	local T IPADDR NAME
-	local RX TX SIGNAL CONNECTED
-	local WIFI
-
-
-	json_add_string "platform" "openwrt"
-
-	json_add_string "hostname" "$(get_hostname)"
-	json_add_string "model" "$(cat /tmp/sysinfo/model 2>/dev/null)"
-	json_add_string "load" "$(get_load)"
-	json_add_int "uptime" "$(get_uptime)"
-
-	MAC="$(get_mac)"
-	json_add_string "mac" "$MAC"
-
-	json_add_string \
-		"software" \
-		"$(awk -F= '/^OPENWRT_RELEASE=/ {print $2}' /etc/os-release 2>/dev/null | xargs)"
-
-
-	[ -e /etc/config/wireless ] || return 0
-
-	LEASEFILE=$(uci -q get dhcp.@dnsmasq[0].leasefile)
-	[ -z "$LEASEFILE" ] && LEASEFILE="/tmp/dhcp.leases"
-
-	HOSTHINTS=$(ubus call luci-rpc getHostHints 2>/dev/null)
-	[ -z "$HOSTHINTS" ] && HOSTHINTS="{}"
-
-	WIRELESSSTATUS=$(ubus call network.wireless status 2>/dev/null)
-	[ -z "$WIRELESSSTATUS" ] && return 0
-
-
-	for BAND in 2g 5g 6g; do
-
-		CHANNELS=""
-		IFNAMES=""
-
-		case "$BAND" in
-			2g)
-				FILTER='@.config.band="2g" || @.config.hwmode="11g"'
-				;;
-			5g)
-				FILTER='@.config.band="5g" || @.config.hwmode="11a"'
-				;;
-			6g)
-				FILTER='@.config.band="6g"'
-				;;
-		esac
-
-		eval $(jsonfilter \
-			-s "$WIRELESSSTATUS" \
-			-q \
-			-e 'CHANNELS=@[@.up=true && ('"$FILTER"')].config.channel' \
-			-e 'IFNAMES=@[@.up=true && ('"$FILTER"')].interfaces[*].ifname')
-
-
-		[ -n "$CHANNELS" ] &&
-			json_add_string "channels${BAND}" "$CHANNELS"
-
-
-		[ -n "$IFNAMES" ] || continue
-
-		json_add_array "clientslist${BAND}"
-
-
-		for IFNAME in $IFNAMES; do
-
-			SSID=$(jsonfilter \
-				-s "$WIRELESSSTATUS" \
-				-q \
-				-e '@.*.interfaces[@.ifname="'${IFNAME}'"].config.ssid')
-
-			if [ -z "$SSID" ]; then
-				T=$(jsonfilter \
-					-s "$WIRELESSSTATUS" \
-					-q \
-					-e '@.*.interfaces[@.ifname="'${IFNAME}'"].config.mesh_id')
-
-				[ -n "$T" ] && SSID="MESHID: $T"
-			fi
-
-
-			for STATION in $(
-				iw dev "$IFNAME" station dump 2>/dev/null |
-				awk '
-					$1 == "Station" {
-						MAC=$2
-						station[MAC]=1
-					}
-
-					/rx bytes:/ {
-						rx[MAC]=$3
-					}
-
-					/tx bytes:/ {
-						tx[MAC]=$3
-					}
-
-					/^[[:space:]]*signal:/ {
-						signal[MAC]=$2
-					}
-
-					/connected time:/ {
-						connected[MAC]=$3
-					}
-
-					END {
-						for (s in station)
-							printf "%s,%s,%s,%d,%d ",
-								s,
-								rx[s],
-								tx[s],
-								signal[s],
-								connected[s]
-					}
-				'
-			); do
-
-				set -- $(echo "$STATION" | tr ',' ' ')
-
-				_MAC="$1"
-				RX="$2"
-				TX="$3"
-				SIGNAL="$4"
-				CONNECTED="$5"
-
-				json_add_object
-
-				json_add_string "ssid" "$SSID"
-				json_add_string "mac" "$_MAC"
-
-				json_add_int "tx" "${TX:-0}"
-				json_add_int "rx" "${RX:-0}"
-				json_add_int "signal" "${SIGNAL:-0}"
-				json_add_int "connected" "${CONNECTED:-0}"
-
-
-				WIFI="0"
-
-				grep -qi "^ht supported" \
-					/sys/kernel/debug/ieee80211/*/*/stations/${_MAC}/ht_capa \
-					2>/dev/null && WIFI="4"
-
-				grep -qi "^vht supported" \
-					/sys/kernel/debug/ieee80211/*/*/stations/${_MAC}/vht_capa \
-					2>/dev/null && WIFI="5"
-
-				grep -qi "^he supported" \
-					/sys/kernel/debug/ieee80211/*/*/stations/${_MAC}/he_capa \
-					2>/dev/null && WIFI="6"
-
-				grep -qi "^eht supported" \
-					/sys/kernel/debug/ieee80211/*/*/stations/${_MAC}/eht_capa \
-					2>/dev/null && WIFI="7"
-
-				json_add_int "wifi" "$WIFI"
-
-
-				IPADDR=""
-				NAME=""
-
-				T=$(awk \
-					'/'${_MAC}'/ {
-						if ($4 == "*")
-							$4=""
-
-						printf "%s %s", $3, $4
-					}' "$LEASEFILE" 2>/dev/null)
-
-				if [ -n "$T" ]; then
-					set -- $T
-					IPADDR="$1"
-					NAME="$2"
-				else
-					IPADDR=$(awk \
-						'/0x[26]\s*'${_MAC}'/ {
-							printf "%s", $1
-							exit
-						}' /proc/net/arp 2>/dev/null)
-				fi
-
-
-				if [ -z "$NAME" ]; then
-					T=$(jsonfilter \
-						-s "$HOSTHINTS" \
-						-q \
-						-e '@["'$(echo "$_MAC" |
-							tr 'a-f' 'A-F')'"].name')
-
-					[ -n "$T" ] && NAME="$T"
-				fi
-
-				json_add_string "ipaddr" "$IPADDR"
-				json_add_string "name" "$NAME"
-
-				json_close_object
-			done
-		done
-
-		json_close_array
-	done
-}
-
-
-#
-# Ubiquiti UniFi
-#
-
-collect_ubiquiti()
-{
-	local INFO DUMP
-	local HOSTNAME MODEL VERSION MAC
-	local CLIENTMAC SSID
-	local BAND
-	local RX TX SIGNAL
-
-
-	json_add_string "platform" "ubiquiti"
-
-
-	#
-	# mca-cli-op info
-	#
-	if command -v mca-cli-op >/dev/null 2>&1; then
-		INFO="$(mca-cli-op info 2>/dev/null)"
-	fi
-
-	if [ -z "$INFO" ] && command -v info >/dev/null 2>&1; then
-		INFO="$(info 2>/dev/null)"
+		return 0
 	fi
 
 
-	HOSTNAME=$(echo "$INFO" |
-		awk -F': ' '/^Name:/ {print $2; exit}')
-
-	MODEL=$(echo "$INFO" |
-		awk -F': ' '/^Model:/ {print $2; exit}')
-
-	VERSION=$(echo "$INFO" |
-		awk -F': ' '/^Version:/ {print $2; exit}')
-
-	MAC=$(echo "$INFO" |
-		awk -F': ' '/^MAC Address:/ {print $2; exit}')
-
-	[ -z "$HOSTNAME" ] && HOSTNAME="$(get_hostname)"
-	[ -z "$MAC" ] && MAC="$(get_mac)"
-
-
-	json_add_string "hostname" "$HOSTNAME"
-	json_add_string "model" "$MODEL"
-	json_add_string "mac" "$MAC"
-	json_add_string "software" "$VERSION"
-	json_add_string "load" "$(get_load)"
-	json_add_int "uptime" "$(get_uptime)"
-
-
 	#
-	# UniFi APs expose a JSON-like data dump through mca-dump.
+	# OpenWrt
 	#
-	if command -v mca-dump >/dev/null 2>&1; then
-		DUMP="$(mca-dump 2>/dev/null)"
+	if [ -f /etc/openwrt_release ] ||
+	   [ -f /etc/openwrt_version ]; then
+		echo "openwrt"
+		return 0
 	fi
 
-	[ -n "$DUMP" ] || return 0
 
-
-	#
-	# mca-dump contains wireless client information.
-	#
-	# Do not try to feed the complete proprietary JSON into
-	# jshn because UniFi firmware versions differ considerably.
-	#
-	for BAND in 2g 5g 6g; do
-
-		case "$BAND" in
-			2g)
-				echo "$DUMP" | grep -q '"radio":"ng"' ||
-					echo "$DUMP" | grep -q '"radio":"2g"' ||
-					continue
-				;;
-
-			5g)
-				echo "$DUMP" | grep -q '"radio":"na"' ||
-					echo "$DUMP" | grep -q '"radio":"5g"' ||
-					continue
-				;;
-
-			6g)
-				echo "$DUMP" | grep -q '"radio":"6g"' ||
-					continue
-				;;
-		esac
-
-		#
-		# Client extraction differs between UniFi firmware
-		# generations. Keep the raw dump available if parsing
-		# isn't possible.
-		#
-		json_add_array "clientslist${BAND}"
-
-		for CLIENTMAC in $(
-			echo "$DUMP" |
-			grep -oE '"mac"[[:space:]]*:[[:space:]]*"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}"' |
-			sed 's/.*"mac"[[:space:]]*:[[:space:]]*"//;s/"$//' |
-			sort -u
-		); do
-
-			[ "$CLIENTMAC" = "$MAC" ] && continue
-
-			json_add_object
-			json_add_string "mac" "$CLIENTMAC"
-
-			SSID=$(echo "$DUMP" |
-				grep -B5 -A15 "\"mac\"[[:space:]]*:[[:space:]]*\"$CLIENTMAC\"" |
-				grep -m1 -oE '"essid"[[:space:]]*:[[:space:]]*"[^"]*"' |
-				sed 's/.*"essid"[[:space:]]*:[[:space:]]*"//;s/"$//')
-
-			json_add_string "ssid" "$SSID"
-
-			RX=$(echo "$DUMP" |
-				grep -B5 -A15 "\"mac\"[[:space:]]*:[[:space:]]*\"$CLIENTMAC\"" |
-				grep -m1 -oE '"rx_bytes"[[:space:]]*:[[:space:]]*[0-9]+' |
-				sed 's/[^0-9]*//')
-
-			TX=$(echo "$DUMP" |
-				grep -B5 -A15 "\"mac\"[[:space:]]*:[[:space:]]*\"$CLIENTMAC\"" |
-				grep -m1 -oE '"tx_bytes"[[:space:]]*:[[:space:]]*[0-9]+' |
-				sed 's/[^0-9]*//')
-
-			SIGNAL=$(echo "$DUMP" |
-				grep -B5 -A15 "\"mac\"[[:space:]]*:[[:space:]]*\"$CLIENTMAC\"" |
-				grep -m1 -oE '"signal"[[:space:]]*:[[:space:]]*-?[0-9]+' |
-				sed 's/[^0-9-]*//')
-
-			json_add_int "rx" "${RX:-0}"
-			json_add_int "tx" "${TX:-0}"
-			json_add_int "signal" "${SIGNAL:-0}"
-			json_add_int "connected" "0"
-			json_add_int "wifi" "0"
-			json_add_string "ipaddr" ""
-			json_add_string "name" ""
-
-			json_close_object
-		done
-
-		json_close_array
-	done
+	return 1
 }
 
 
 #
-# TP-Link Omada EAP
-#
-
-collect_omada()
-{
-	local VERSION HOSTNAME MODEL MAC UPTIME
-	local IFACES
-	local PORT BAND CHANNEL
-	local STATIONS
-	local CLIENTMAC
-
-
-	json_add_string "platform" "omada"
-
-
-	#
-	# Omada CLI needs public mode.
-	#
-	VERSION=$(
-		printf 'enable\nshow version\nexit\n' |
-		cliclientd 2>/dev/null
-	)
-
-	UPTIME=$(
-		printf 'enable\nshow uptime\nexit\n' |
-		cliclientd 2>/dev/null
-	)
-
-	IFACES=$(
-		printf 'enable\nshow wifi interfaces\nexit\n' |
-		cliclientd 2>/dev/null
-	)
-
-
-	#
-	# Hostname / model / software.
-	#
-	HOSTNAME="$(get_hostname)"
-
-	MODEL=$(echo "$VERSION" |
-		grep -i -m1 'model' |
-		sed 's/.*:[[:space:]]*//')
-
-	[ -z "$MODEL" ] &&
-		MODEL=$(get_hostname)
-
-	VERSION=$(echo "$VERSION" |
-		grep -i -m1 -E 'version|firmware' |
-		sed 's/.*:[[:space:]]*//')
-
-
-	MAC="$(get_mac)"
-
-
-	json_add_string "hostname" "$HOSTNAME"
-	json_add_string "model" "$MODEL"
-	json_add_string "mac" "$MAC"
-	json_add_string "software" "$VERSION"
-	json_add_string "load" "$(get_load)"
-	json_add_int "uptime" "$(get_uptime)"
-
-
-	#
-	# Wireless interfaces.
-	#
-	# Omada documents:
-	#   show wifi interfaces
-	#   show wifi status <port> <key>
-	#   show station info [mac]
-	#
-	# https://static.tp-link.com/...
-	#
-
-	#
-	# First try to get station list.
-	#
-	STATIONS=$(
-		printf 'enable\nshow station info\nexit\n' |
-		cliclientd 2>/dev/null
-	)
-
-	#
-	# Put all clients into 2g/5g/6g buckets when
-	# the CLI does not expose the radio in an easily
-	# parseable way.
-	#
-	#
-	# We intentionally don't invent RX/TX/signal values.
-	# Omada firmware versions have different output layouts.
-	#
-
-	for BAND in 2g 5g 6g; do
-		json_add_array "clientslist${BAND}"
-
-		for CLIENTMAC in $(
-			echo "$STATIONS" |
-			grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' |
-			sort -u
-		); do
-
-			[ "$CLIENTMAC" = "$MAC" ] && continue
-
-			json_add_object
-
-			json_add_string "ssid" ""
-			json_add_string "mac" "$CLIENTMAC"
-			json_add_int "rx" "0"
-			json_add_int "tx" "0"
-			json_add_int "signal" "0"
-			json_add_int "connected" "0"
-			json_add_int "wifi" "0"
-			json_add_string "ipaddr" ""
-			json_add_string "name" ""
-
-			json_close_object
-		done
-
-		json_close_array
-	done
-}
-
-
-#
-# Generic
-#
-
-collect_generic()
-{
-	json_add_string "platform" "unknown"
-	json_add_string "hostname" "$(get_hostname)"
-	json_add_string "model" ""
-	json_add_string "load" "$(get_load)"
-	json_add_int "uptime" "$(get_uptime)"
-	json_add_string "mac" "$(get_mac)"
-	json_add_string "software" ""
-}
-
-
-#
-# Main
+# Detect platform
 #
 
 PLATFORM="$(detect_platform)"
 
 case "$PLATFORM" in
-	openwrt)
-		collect_openwrt
-		;;
 
-	ubiquiti)
-		collect_ubiquiti
+	openwrt)
+		AGENT="$AGENT_DIR/apcontroller-agent-openwrt"
 		;;
 
 	omada)
-		collect_omada
+		AGENT="$AGENT_DIR/apcontroller-agent-omada"
+		;;
+
+	ubiquiti)
+		AGENT="$AGENT_DIR/apcontroller-agent-ubiquiti"
 		;;
 
 	*)
-		collect_generic
+		logger -t apcontroller-agent \
+			"unsupported platform"
+		exit 1
 		;;
+
 esac
 
 
-json_dump
+#
+# Check selected agent
+#
+
+if [ ! -x "$AGENT" ]; then
+	logger -t apcontroller-agent \
+		"agent not found: $AGENT"
+	exit 1
+fi
+
+
+#
+# Run platform-specific agent.
+#
+# The selected agent must return complete JSON on stdout.
+#
+
+JSON="$("$AGENT" 2>/dev/null)"
+
+if [ -z "$JSON" ]; then
+	logger -t apcontroller-agent \
+		"agent returned no data: $PLATFORM"
+	exit 1
+fi
+
+
+#
+# Validate JSON
+#
+
+if ! jsonfilter -s "$JSON" -e '@' >/dev/null 2>&1; then
+	logger -t apcontroller-agent \
+		"agent returned invalid JSON: $PLATFORM"
+	exit 1
+fi
+
+
+#
+# Pass JSON unchanged to ubus
+#
+
+if ! ubus send "$UBUS_EVENT" "$JSON" >/dev/null 2>&1; then
+	logger -t apcontroller-agent \
+		"ubus send failed: $PLATFORM"
+	exit 1
+fi
 
 exit 0
