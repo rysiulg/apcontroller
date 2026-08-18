@@ -1,0 +1,24 @@
+#!/bin/sh
+
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+
+BASEFOLDER="/usr/share/apcontroller"
+LIBFOLDER="${BASEFOLDER}/lib"
+
+. "${LIBFOLDER}/common.sh"
+. "${LIBFOLDER}/platform.sh"
+
+mkdir -p /tmp/apcontroller-poll.lock 2>/dev/null || exit 0
+trap 'rmdir /tmp/apcontroller-poll.lock 2>/dev/null' EXIT INT TERM
+
+config_load apcontroller
+
+for cfg in $(uci -q show apcontroller |
+        sed -n 's/^apcontroller\.\([^=]*\)=host$/\1/p'); do
+
+        apc_debug rpc "background poll host=$cfg"
+
+        get_data_from_host "$cfg"
+done
+
+exit 0

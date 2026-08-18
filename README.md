@@ -1,6 +1,8 @@
 # AP Controller - Access Point (AP) Management System for OpenWrt/LuCI
  
 [Wersja polska](README.pl.md)
+
+Refactor from Cezary repo whole apcontroller to get data from omada/ubiquity unify ap also
  
 The application is a lightweight Access Point (AP) management system, developed as an extension for OpenWrt/LuCI. Its main purpose is to monitor network devices and automate the creation and update of Wi-Fi networks without requiring additional software packages to be installed on the access points.
  

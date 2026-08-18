@@ -1,3 +1,4 @@
+#!/bin/sh
 #
 # Find active channel for radio from vap_table.
 #
