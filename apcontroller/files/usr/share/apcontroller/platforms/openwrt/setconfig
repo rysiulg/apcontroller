@@ -1,5 +1,10 @@
 #!/bin/sh
 
+#
+# APController OpenWrt configuration agent
+# Path: /usr/share/apcontroller/lib/platforms/openwrt/setconfig
+#
+
 FILE="$1"
 [ -s "$FILE" ] || exit 1
 

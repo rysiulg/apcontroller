@@ -24,7 +24,7 @@ LIBFOLDER="${BASEFOLDER}/lib"
 . "${LIBFOLDER}/ssh.sh"
 
 #
-# Platform detection + agents + polling
+# Platform detection + platform agents + polling
 #
 
 . "${LIBFOLDER}/platform.sh"
@@ -53,6 +53,7 @@ mkdir -p "$BASEPATH"
 ###############################################################################
 
 config_load apcontroller
+
 config_foreach get_data_from_host host
 
 exit 0

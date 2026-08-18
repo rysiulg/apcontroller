@@ -1,6 +1,7 @@
 
 config global
 	option interval '5'
+	# katalog roboczy kontrolera
 	option path '/tmp/apcontroller'
 	list column 'enabled'
 	list column 'name'
@@ -16,6 +17,22 @@ config global
 	list clientcolumn 'connected'
 	list clientcolumn 'rx'
 	list clientcolumn 'tx'
+	# HTTP API
+	option api_enabled '1'
+	option api_bind '0.0.0.0'
+	option api_port '8080'
+	option api_path '/cgi-bin/apcontroller-agent'
+	# miejsce instalacji agenta na AP
+	option remote_agent '/tmp/apcontroller'
+	# poll
+	option poll_interval '30'
+
+	# SSH
+	option ssh_connect_timeout '8'
+
+	# logowanie
+	option debug '1'
+	option logfile '/var/log/apcontroller.log'
 
 config host 'host1'
 	option enabled '0'
@@ -24,3 +41,4 @@ config host 'host1'
 	option port '22'
 	option username 'root'
 	option password ''
+	option platform 'auto'

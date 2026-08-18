@@ -1,131 +1,196 @@
 #!/bin/sh
 
 #
+# APController local event agent
+#
 # (c) 2025-2026 Cezary Jackiewicz <cezary@eko.one.pl>
 #
 
 PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 
-AGENT_DIR="/usr/bin"
 UBUS_EVENT="apcontroller"
+
+#
+# Platform-specific LOCAL agents.
+#
+# These are deliberately separate from:
+#
+#   platforms/<platform>/agent
+#
+# The latter are controller polling agents.
+#
+
+OPENWRT_AGENT="/usr/share/apcontroller/apcontroller-agent-openwrt"
+OMADA_AGENT="/usr/share/apcontroller/apcontroller-agent-omada"
+UBIQUITI_AGENT="/usr/share/apcontroller/apcontroller-agent-ubiquiti"
 
 
 #
-# Detect platform
+# ---------------------------------------------------------------------------
+# Detect local platform
+# ---------------------------------------------------------------------------
 #
 
 detect_platform()
 {
-	#
-	# Ubiquiti / UniFi
-	#
-	if command -v mca-dump >/dev/null 2>&1 ||
-	   command -v mca-cli-op >/dev/null 2>&1 ||
-	   [ -f /etc/ubnt_version ]; then
-		echo "ubiquiti"
-		return 0
-	fi
+        #
+        # Ubiquiti / UniFi
+        #
+
+        if command -v mca-dump >/dev/null 2>&1 ||
+           command -v mca-cli-op >/dev/null 2>&1 ||
+           [ -f /etc/ubnt_version ]; then
+
+                echo "ubiquiti"
+                return 0
+        fi
 
 
-	#
-	# TP-Link Omada
-	#
-	if command -v cliclientd >/dev/null 2>&1 ||
-	   [ -d /etc/omada ] ||
-	   [ -d /etc/tplink ]; then
-		echo "omada"
-		return 0
-	fi
+        #
+        # TP-Link Omada
+        #
+
+        if command -v cliclientd >/dev/null 2>&1 ||
+           [ -d /etc/omada ] ||
+           [ -d /etc/tplink ]; then
+
+                echo "omada"
+                return 0
+        fi
 
 
-	#
-	# OpenWrt
-	#
-	if [ -f /etc/openwrt_release ] ||
-	   [ -f /etc/openwrt_version ]; then
-		echo "openwrt"
-		return 0
-	fi
+        #
+        # OpenWrt
+        #
+
+        if [ -f /etc/openwrt_release ] ||
+           [ -f /etc/openwrt_version ]; then
+
+                echo "openwrt"
+                return 0
+        fi
 
 
-	return 1
+        return 1
 }
 
 
 #
-# Detect platform
+# ---------------------------------------------------------------------------
+# Detect
+# ---------------------------------------------------------------------------
 #
 
 PLATFORM="$(detect_platform)"
 
+if [ -z "$PLATFORM" ]; then
+
+        logger -t apcontroller-agent \
+                "cannot detect local platform"
+
+        exit 1
+fi
+
+
+#
+# ---------------------------------------------------------------------------
+# Select LOCAL agent
+# ---------------------------------------------------------------------------
+#
+
 case "$PLATFORM" in
 
-	openwrt)
-		AGENT="$AGENT_DIR/apcontroller-agent-openwrt"
-		;;
+        openwrt)
+                AGENT="$OPENWRT_AGENT"
+                ;;
 
-	omada)
-		AGENT="$AGENT_DIR/apcontroller-agent-omada"
-		;;
+        omada)
+                AGENT="$OMADA_AGENT"
+                ;;
 
-	ubiquiti)
-		AGENT="$AGENT_DIR/apcontroller-agent-ubiquiti"
-		;;
+        ubiquiti)
+                AGENT="$UBIQUITI_AGENT"
+                ;;
 
-	*)
-		logger -t apcontroller-agent \
-			"unsupported platform"
-		exit 1
-		;;
+        *)
+                logger -t apcontroller-agent \
+                        "unsupported platform: $PLATFORM"
 
+                exit 1
+                ;;
 esac
 
 
 #
-# Check selected agent
+# ---------------------------------------------------------------------------
+# Check agent
+# ---------------------------------------------------------------------------
 #
 
 if [ ! -x "$AGENT" ]; then
-	logger -t apcontroller-agent \
-		"agent not found: $AGENT"
-	exit 1
+
+        logger -t apcontroller-agent \
+                "local agent not found: $AGENT"
+
+        exit 1
 fi
 
 
 #
-# Run platform-specific agent.
-#
-# The selected agent must return complete JSON on stdout.
+# ---------------------------------------------------------------------------
+# Run local agent
+# ---------------------------------------------------------------------------
 #
 
 JSON="$("$AGENT" 2>/dev/null)"
+RET=$?
+
+if [ "$RET" -ne 0 ]; then
+
+        logger -t apcontroller-agent \
+                "local agent failed: $PLATFORM ret=$RET"
+
+        exit 1
+fi
+
 
 if [ -z "$JSON" ]; then
-	logger -t apcontroller-agent \
-		"agent returned no data: $PLATFORM"
-	exit 1
+
+        logger -t apcontroller-agent \
+                "local agent returned no data: $PLATFORM"
+
+        exit 1
 fi
 
 
 #
+# ---------------------------------------------------------------------------
 # Validate JSON
+# ---------------------------------------------------------------------------
 #
 
-if ! jsonfilter -s "$JSON" -e '@' >/dev/null 2>&1; then
-	logger -t apcontroller-agent \
-		"agent returned invalid JSON: $PLATFORM"
-	exit 1
+if ! printf '%s\n' "$JSON" |
+        jsonfilter -q -e '@' >/dev/null 2>&1; then
+
+        logger -t apcontroller-agent \
+                "local agent returned invalid JSON: $PLATFORM"
+
+        exit 1
 fi
 
 
 #
-# Pass JSON unchanged to ubus
+# ---------------------------------------------------------------------------
+# Send unchanged JSON to ubus
+# ---------------------------------------------------------------------------
 #
 
 if ! ubus send "$UBUS_EVENT" "$JSON" >/dev/null 2>&1; then
-	logger -t apcontroller-agent \
-		"ubus send failed: $PLATFORM"
-	exit 1
+
+        logger -t apcontroller-agent \
+                "ubus send failed: $PLATFORM"
+
+        exit 1
 fi
 
 exit 0
