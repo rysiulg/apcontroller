@@ -88,12 +88,16 @@ jobs:
 
       # ============================================================
       # FETCH CURRENT MAIN
-      #
-      # Potrzebne do znalezienia ostatniego PKG_RELEASE.
       # ============================================================
       - name: Fetch current main
         run: |
+          set -e
+
           git fetch origin main
+
+          echo
+          echo "Current origin/main:"
+          git rev-parse origin/main
 
       # ============================================================
       # DOWNLOAD OPENWRT SDK
@@ -150,14 +154,21 @@ jobs:
       # ============================================================
       # DETERMINE NEXT PACKAGE REVISION
       #
-      # Szukamy najwyższego:
+      # Obsługiwane nazwy:
       #
-      #   apcontroller-*-rX.apk
-      #   luci-app-apcontroller-*-rX.apk
+      #   apcontroller-1.0-r1.apk
+      #   apcontroller-1.0-r1_aarch64_cortex-a53.apk
+      #   apcontroller-1.0-r12_aarch64_cortex-a53.apk
       #
-      # w aktualnym origin/main.
+      # Szukamy najwyższego rX w origin/main.
       #
-      # Jeżeli jest r4 -> budujemy r5.
+      # Jeżeli jest:
+      #
+      #   r1 -> r2
+      #   r2 -> r3
+      #   r3 -> r4
+      #
+      # itd.
       # ============================================================
       - name: Determine package revision
         run: |
@@ -170,65 +181,175 @@ jobs:
             local BASE
             local REV
 
-            for FILE in \
-              $(git ls-tree -r --name-only origin/main -- \
-                "feed/${ARCH}/${PACKAGE}-*.apk" 2>/dev/null); do
+            echo
+            echo "============================================================"
+            echo "Searching revision for: ${PACKAGE}"
+            echo "============================================================"
+
+            while IFS= read -r FILE; do
+              [ -z "$FILE" ] && continue
 
               BASE="$(basename "$FILE")"
 
-              REV="$(echo "$BASE" | sed -n \
-                's/.*-r\([0-9][0-9]*\)\.apk$/\1/p')"
+              # Obsługuje:
+              #
+              # package-1.0-r1.apk
+              # package-1.0-r1_aarch64_cortex-a53.apk
+              # package-1.0-r12_aarch64_cortex-a53.apk
+              #
+              REV="$(printf '%s\n' "$BASE" | \
+                sed -nE 's/.*-r([0-9]+)(_.*)?\.apk$/\1/p')"
 
-              if [ -n "$REV" ] && [ "$REV" -gt "$MAX" ]; then
-                MAX="$REV"
+              if [ -n "$REV" ]; then
+                echo "Found: $BASE -> r${REV}"
+
+                if [ "$REV" -gt "$MAX" ]; then
+                  MAX="$REV"
+                fi
+              else
+                echo "WARNING: Could not determine revision from:"
+                echo "         $BASE"
               fi
-            done
+
+            done < <(
+              git ls-tree -r --name-only origin/main -- \
+                "feed/${ARCH}/${PACKAGE}-*.apk"
+            )
+
+            echo
+            echo "Highest revision for ${PACKAGE}: r${MAX}"
 
             echo "$MAX"
           }
 
-          AP_REV="$(get_latest_revision apcontroller)"
-          LUCI_REV="$(get_latest_revision luci-app-apcontroller)"
+          # ----------------------------------------------------------
+          # UWAGA:
+          # funkcja wypisuje logi, dlatego bierzemy tylko ostatnią
+          # linię jako wynik liczbowy.
+          # ----------------------------------------------------------
 
-          echo "Current apcontroller revision: r${AP_REV}"
-          echo "Current luci-app-apcontroller revision: r${LUCI_REV}"
+          AP_REV="$(
+            get_latest_revision apcontroller | tail -n 1
+          )"
+
+          LUCI_REV="$(
+            get_latest_revision luci-app-apcontroller | tail -n 1
+          )"
+
+          # ----------------------------------------------------------
+          # Walidacja
+          # ----------------------------------------------------------
+
+          if ! [[ "$AP_REV" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: Invalid apcontroller revision: '$AP_REV'"
+            exit 1
+          fi
+
+          if ! [[ "$LUCI_REV" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: Invalid luci-app-apcontroller revision: '$LUCI_REV'"
+            exit 1
+          fi
+
+          echo
+          echo "============================================================"
+          echo "CURRENT REVISIONS"
+          echo "============================================================"
+
+          echo "apcontroller:          r${AP_REV}"
+          echo "luci-app-apcontroller: r${LUCI_REV}"
+
+          # ----------------------------------------------------------
+          # NEXT REVISION
+          # ----------------------------------------------------------
 
           AP_NEW=$((AP_REV + 1))
           LUCI_NEW=$((LUCI_REV + 1))
 
-          echo "New apcontroller revision: r${AP_NEW}"
-          echo "New luci-app-apcontroller revision: r${LUCI_NEW}"
+          echo
+          echo "============================================================"
+          echo "NEW REVISIONS"
+          echo "============================================================"
+
+          echo "apcontroller:          r${AP_NEW}"
+          echo "luci-app-apcontroller: r${LUCI_NEW}"
+
+          # ----------------------------------------------------------
+          # MAKEFILES
+          # ----------------------------------------------------------
 
           AP_MAKEFILE="$SDK/package/apcontroller/Makefile"
           LUCI_MAKEFILE="$SDK/package/luci-app-apcontroller/Makefile"
 
+          if [ ! -f "$AP_MAKEFILE" ]; then
+            echo "ERROR: Missing Makefile:"
+            echo "$AP_MAKEFILE"
+            exit 1
+          fi
+
+          if [ ! -f "$LUCI_MAKEFILE" ]; then
+            echo "ERROR: Missing Makefile:"
+            echo "$LUCI_MAKEFILE"
+            exit 1
+          fi
+
+          # ----------------------------------------------------------
+          # APController
+          # ----------------------------------------------------------
+
           if grep -q '^[[:space:]]*PKG_RELEASE:=' "$AP_MAKEFILE"; then
+
             sed -i \
               "s/^[[:space:]]*PKG_RELEASE:=.*/PKG_RELEASE:=${AP_NEW}/" \
               "$AP_MAKEFILE"
+
           else
+
             sed -i \
               "/^[[:space:]]*PKG_VERSION:=/a PKG_RELEASE:=${AP_NEW}" \
               "$AP_MAKEFILE"
+
           fi
 
+          # ----------------------------------------------------------
+          # LuCI application
+          # ----------------------------------------------------------
+
           if grep -q '^[[:space:]]*PKG_RELEASE:=' "$LUCI_MAKEFILE"; then
+
             sed -i \
               "s/^[[:space:]]*PKG_RELEASE:=.*/PKG_RELEASE:=${LUCI_NEW}/" \
               "$LUCI_MAKEFILE"
+
           else
+
             sed -i \
               "/^[[:space:]]*PKG_VERSION:=/a PKG_RELEASE:=${LUCI_NEW}" \
               "$LUCI_MAKEFILE"
+
           fi
 
-          echo
-          echo "apcontroller:"
-          grep -E 'PKG_VERSION|PKG_RELEASE' "$AP_MAKEFILE" || true
+          # ----------------------------------------------------------
+          # SHOW RESULT
+          # ----------------------------------------------------------
 
           echo
-          echo "luci-app-apcontroller:"
-          grep -E 'PKG_VERSION|PKG_RELEASE' "$LUCI_MAKEFILE" || true
+          echo "============================================================"
+          echo "MODIFIED MAKEFILES"
+          echo "============================================================"
+
+          echo
+          echo "--- apcontroller/Makefile ---"
+          grep -E '^[[:space:]]*PKG_(VERSION|RELEASE):=' \
+            "$AP_MAKEFILE" || true
+
+          echo
+          echo "--- luci-app-apcontroller/Makefile ---"
+          grep -E '^[[:space:]]*PKG_(VERSION|RELEASE):=' \
+            "$LUCI_MAKEFILE" || true
+
+          # Zachowujemy wartości dla kolejnych kroków.
+          echo "AP_NEW=${AP_NEW}" >> "$GITHUB_ENV"
+          echo "LUCI_NEW=${LUCI_NEW}" >> "$GITHUB_ENV"
 
       # ============================================================
       # UPDATE FEEDS
@@ -236,6 +357,8 @@ jobs:
       - name: Update feeds
         working-directory: ${{ env.SDK }}
         run: |
+          set -e
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -245,6 +368,8 @@ jobs:
       - name: Configure
         working-directory: ${{ env.SDK }}
         run: |
+          set -e
+
           make defconfig
 
       # ============================================================
@@ -253,6 +378,10 @@ jobs:
       - name: Build apcontroller
         working-directory: ${{ env.SDK }}
         run: |
+          set -e
+
+          echo "Building apcontroller r${AP_NEW}..."
+
           make package/apcontroller/compile V=s
 
       # ============================================================
@@ -261,16 +390,20 @@ jobs:
       - name: Build luci-app-apcontroller
         working-directory: ${{ env.SDK }}
         run: |
+          set -e
+
+          echo "Building luci-app-apcontroller r${LUCI_NEW}..."
+
           make package/luci-app-apcontroller/compile V=s
 
       # ============================================================
       # BUILD HOST APK-TOOLS
-      #
-      # SDK może nie mieć apk w staging_dir/host/bin.
       # ============================================================
       - name: Build host apk-tools
         working-directory: ${{ env.SDK }}
         run: |
+          set -e
+
           make package/apk/host/compile V=s
 
       # ============================================================
@@ -299,6 +432,7 @@ jobs:
 
           echo "APK=$APK" >> "$GITHUB_ENV"
 
+          echo
           echo "Using APK:"
           echo "$APK"
 
@@ -326,15 +460,99 @@ jobs:
             -exec cp -f {} "feed/${ARCH}/" \;
 
           echo
-          echo "Collected APKs:"
+          echo "============================================================"
+          echo "COLLECTED APKs"
+          echo "============================================================"
+
           ls -lah "feed/${ARCH}"
 
-          COUNT="$(find "feed/${ARCH}" -maxdepth 1 -name '*.apk' | wc -l)"
+          COUNT="$(
+            find "feed/${ARCH}" \
+              -maxdepth 1 \
+              -type f \
+              -name '*.apk' \
+              | wc -l
+          )"
 
           if [ "$COUNT" -lt 2 ]; then
             echo "ERROR: Expected at least 2 APKs, found $COUNT"
             exit 1
           fi
+
+          # ----------------------------------------------------------
+          # Dodatkowa kontrola PKG_RELEASE.
+          #
+          # Sprawdzamy, czy wygenerowane nazwy faktycznie zawierają
+          # oczekiwane rX.
+          # ----------------------------------------------------------
+
+          echo
+          echo "Checking generated revisions..."
+
+          AP_FILE="$(
+            find "feed/${ARCH}" \
+              -maxdepth 1 \
+              -type f \
+              -name 'apcontroller-*.apk' \
+              | head -1
+          )"
+
+          LUCI_FILE="$(
+            find "feed/${ARCH}" \
+              -maxdepth 1 \
+              -type f \
+              -name 'luci-app-apcontroller-*.apk' \
+              | head -1
+          )"
+
+          if [ -z "$AP_FILE" ]; then
+            echo "ERROR: apcontroller APK not found."
+            exit 1
+          fi
+
+          if [ -z "$LUCI_FILE" ]; then
+            echo "ERROR: luci-app-apcontroller APK not found."
+            exit 1
+          fi
+
+          AP_BASE="$(basename "$AP_FILE")"
+          LUCI_BASE="$(basename "$LUCI_FILE")"
+
+          AP_BUILT_REV="$(
+            printf '%s\n' "$AP_BASE" |
+              sed -nE 's/.*-r([0-9]+)(_.*)?\.apk$/\1/p'
+          )"
+
+          LUCI_BUILT_REV="$(
+            printf '%s\n' "$LUCI_BASE" |
+              sed -nE 's/.*-r([0-9]+)(_.*)?\.apk$/\1/p'
+          )"
+
+          echo "apcontroller APK:"
+          echo "  $AP_BASE"
+          echo "  detected revision: r${AP_BUILT_REV}"
+          echo "  expected revision: r${AP_NEW}"
+
+          echo
+          echo "luci-app-apcontroller APK:"
+          echo "  $LUCI_BASE"
+          echo "  detected revision: r${LUCI_BUILT_REV}"
+          echo "  expected revision: r${LUCI_NEW}"
+
+          if [ "$AP_BUILT_REV" != "$AP_NEW" ]; then
+            echo
+            echo "ERROR: apcontroller revision mismatch!"
+            exit 1
+          fi
+
+          if [ "$LUCI_BUILT_REV" != "$LUCI_NEW" ]; then
+            echo
+            echo "ERROR: luci-app-apcontroller revision mismatch!"
+            exit 1
+          fi
+
+          echo
+          echo "Revision check OK."
 
       # ============================================================
       # GENERATE APK REPOSITORY INDEX
@@ -388,12 +606,10 @@ jobs:
       #
       # 1. Pobieramy najnowszy main.
       # 2. Resetujemy checkout do origin/main.
-      # 3. Wstawiamy świeżo wygenerowany feed.
+      # 3. Wstawiamy świeży feed.
       # 4. Wstawiamy klucze.
       # 5. Commit.
       # 6. Push.
-      #
-      # Dzięki temu packages.adb nigdy nie jest scalany jako binary.
       # ============================================================
       - name: Commit and push feed
         run: |
@@ -403,21 +619,31 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           for ATTEMPT in 1 2 3 4 5; do
+
             echo
             echo "============================================================"
             echo "Push attempt ${ATTEMPT}/5"
             echo "============================================================"
 
+            # --------------------------------------------------------
+            # Pobierz najnowszy main.
+            # --------------------------------------------------------
+
             git fetch origin main
 
-            #
-            # Aktualny stan zdalnego main.
-            #
+            echo "origin/main:"
+            git rev-parse origin/main
+
+            # --------------------------------------------------------
+            # Ustaw checkout dokładnie na aktualnym main.
+            # --------------------------------------------------------
+
             git reset --hard origin/main
 
-            #
-            # Wstawiamy świeży feed z tego builda.
-            #
+            # --------------------------------------------------------
+            # Wstaw świeży feed z tego builda.
+            # --------------------------------------------------------
+
             rm -rf "feed/${ARCH}"
             mkdir -p "feed/${ARCH}"
 
@@ -425,40 +651,71 @@ jobs:
               "$RUNNER_TEMP/apcontroller-feed/." \
               "feed/${ARCH}/"
 
-            #
-            # Klucze z tego builda.
-            #
+            # --------------------------------------------------------
+            # Klucze.
+            # --------------------------------------------------------
+
             mkdir -p keys
 
             if [ -f keys/apcontroller.rsa ] && \
                [ -f keys/apcontroller.rsa.pub ]; then
+
               echo "Signing keys present."
+
             else
+
               echo "ERROR: signing keys disappeared after reset"
               exit 1
+
             fi
+
+            # --------------------------------------------------------
+            # Git status.
+            # --------------------------------------------------------
+
+            echo
+            echo "Git status:"
+            git status --short
 
             git add \
               "feed/${ARCH}" \
               keys/apcontroller.rsa \
               keys/apcontroller.rsa.pub
 
+            # --------------------------------------------------------
+            # Czy coś się zmieniło?
+            # --------------------------------------------------------
+
             if git diff --cached --quiet; then
+              echo
               echo "No changes to commit."
               exit 0
             fi
 
+            # --------------------------------------------------------
+            # Commit.
+            # --------------------------------------------------------
+
             git commit \
               -m "Build OpenWrt ${OPENWRT_VERSION} APK feed"
 
-            #
-            # Normalny push.
-            #
+            # --------------------------------------------------------
+            # Push.
+            # --------------------------------------------------------
+
             if git push origin HEAD:main; then
+
               echo
+              echo "============================================================"
               echo "Feed pushed successfully."
+              echo "============================================================"
+
               exit 0
             fi
+
+            # --------------------------------------------------------
+            # Ktoś zmienił main.
+            # --------------------------------------------------------
 
             echo
             echo "Push failed because origin/main changed."
@@ -467,6 +724,7 @@ jobs:
             git reset --hard origin/main
 
             sleep 2
+
           done
 
           echo
