@@ -123,6 +123,45 @@ apc_platform_detect()
 		apc_debug platform \
 			"trying platform=$platform host=$ipaddr"
 
+
+		############################################################################
+		# LOCAL / INTERACTIVE DETECTOR
+		############################################################################
+
+		local_detector="apc_platform_${platform}_detect_local"
+
+		if type "$local_detector" >/dev/null 2>&1; then
+
+			apc_debug platform \
+				"trying local detector platform=$platform host=$ipaddr"
+
+			result="$(
+				"$local_detector" \
+					"$ipaddr" \
+					"$port" \
+					"$username" \
+					"$password" \
+					"$keyfile" \
+					"$usekeyfile"
+			)"
+
+			if [ -n "$result" ]; then
+
+				apc_debug platform \
+					"detected platform=$platform host=$ipaddr result=$result"
+
+				printf '%s\n' "$platform"
+				return 0
+			fi
+
+			continue
+		fi
+
+
+		############################################################################
+		# NORMAL REMOTE SHELL DETECTOR
+		############################################################################
+
 		command="$("$detector")"
 
 		[ -n "$command" ] || continue
