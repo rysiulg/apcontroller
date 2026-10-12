@@ -60,7 +60,7 @@ function hostStatus(records, section_id) {
 	let lastContact_ts = -1;
 
 	const obj = records.find(item => item && item.section === section_id);
-	if (obj && obj.verification) return E('span', {title:_('Zapis danych z VPN, odpytywanie wyłączone'),style:'color:#8a6800'},_('Weryfikacja'));
+	if (obj && obj.verification) return E('span', {title:_('Zapis danych z VPN, odpytywanie wyĹ‚Ä…czone'),style:'color:#8a6800'},_('Weryfikacja'));
 	if (obj && !obj.enabled) return E('span', { 'style': 'color: gray' }, _('Disabled'));
 
 	if (obj) {
@@ -72,16 +72,16 @@ function hostStatus(records, section_id) {
 		return E('span', '-');
 
 	const timestamp = new Date().getTime() / 1000;
-	if (obj && obj.online === 0) return E('span', { 'style': 'color: red' }, '● ' + _('Offline'));
+	if (obj && obj.online === 0) return E('span', { 'style': 'color: red' }, 'â—Ź ' + _('Offline'));
 	const interval = uci.get('apcontroller', '@global[0]', 'interval');
 
 	if (!interval)
 		return E('span', { 'style': 'color: gray' }, _('Unknown'));
 
 	if (timestamp - lastContact_ts > parseInt(interval) * 2.5 * 60)
-		return E('span', { 'style': 'color: red' }, '● ' + _('Offline'));
+		return E('span', { 'style': 'color: red' }, 'â—Ź ' + _('Offline'));
 
-	return E('span', { 'style': 'color: green' }, '● ' + _('Online'));
+	return E('span', { 'style': 'color: green' }, 'â—Ź ' + _('Online'));
 }
 
 function hostInfo(key, records, section_id) {
@@ -138,7 +138,7 @@ return view.extend({
 				);
 			})
 			.then(() => this.super('handleSaveApply', [ev, mode]))
-			.then(async () => { const r=await fs.exec('/usr/bin/apcontroller-vpn',['apply']); if(r.code)throw new Error(r.stderr||r.stdout||'Błąd konfiguracji VPN'); })
+			.then(async () => { const r=await fs.exec('/usr/bin/apcontroller-vpn',['apply']); if(r.code)throw new Error(r.stderr||r.stdout||'BĹ‚Ä…d konfiguracji VPN'); })
 			.then(() => {
 				const container =
 					document.querySelector('.cbi-value[data-name="interval"]');
@@ -210,7 +210,7 @@ return view.extend({
 			'software': _('Software'),
 			'uptime': _('Uptime'),
 			'load': _('Load Average'),
-			'cpu': _('CPU (%)'), 'memory_total': _('Pamięć całkowita (B)'), 'memory_used': _('Pamięć użyta (B)'),
+			'cpu': _('CPU (%)'), 'memory_total': _('PamiÄ™Ä‡ caĹ‚kowita (B)'), 'memory_used': _('PamiÄ™Ä‡ uĹĽyta (B)'),
 			'clients2g': _('2.4 GHz Clients'),
 			'clients5g': _('5 GHz Clients'),
 			'clients6g': _('6 GHz Clients'),
@@ -233,7 +233,7 @@ return view.extend({
 			'tx': _('TX'),
 			'rxrate': _('RX rate'), 'txrate': _('TX rate'), 'noise': _('Noise (dBm)'),
 			'tx_retries': _('TX retries'), 'rx_retries': _('RX retries'), 'tx_packets': _('TX packets'), 'rx_packets': _('RX packets'),
-			'wifi_tx_dropped': _('TX dropped'), 'name_source': _('Źródło nazwy')
+			'wifi_tx_dropped': _('TX dropped'), 'name_source': _('ĹąrĂłdĹ‚o nazwy')
 		};
 
 		function ipv4(value) {
@@ -518,7 +518,7 @@ return view.extend({
 
 			function formatCell(key, client) {
 				switch (key) {
-				case 'ipaddr': { const tag=subnetTag(client.ipaddr); return E('span',tag?{'class':'apc-subnet',title:'Podsieć: '+tag.label,style:'border-color:'+tag.color+';color:'+tag.color}:{},String(client.ipaddr||'-').replace(/<br\s*\/?\s*>/gi,', ')); }
+				case 'ipaddr': { const tag=subnetTag(client.ipaddr); return E('span',tag?{'class':'apc-subnet',title:'PodsieÄ‡: '+tag.label,style:'border-color:'+tag.color+';color:'+tag.color}:{},String(client.ipaddr||'-').replace(/<br\s*\/?\s*>/gi,', ')); }
 				case 'band':
 					if (client.band == 2)
 						return '2.4 GHz';
@@ -1360,7 +1360,7 @@ return view.extend({
 				_('More Information'),
 				[
 					table,
-					E('details', {}, [E('summary', {}, _('Dane diagnostyczne AP, radia i klientów')), E('p', {}, _('Liczniki retries są kumulacyjne; nie stanowią procentu strat. Brak pola oznacza brak danych ze sprzętu.')), E('pre', {style:'max-height:420px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere'}, JSON.stringify(host || {}, null, 2))]),
+					E('details', {}, [E('summary', {}, _('Dane diagnostyczne AP, radia i klientĂłw')), E('p', {}, _('Liczniki retries sÄ… kumulacyjne; nie stanowiÄ… procentu strat. Brak pola oznacza brak danych ze sprzÄ™tu.')), E('pre', {style:'max-height:420px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere'}, JSON.stringify(host || {}, null, 2))]),
 					E(
 						'div',
 						{ 'class': 'right' },
@@ -1993,7 +1993,7 @@ return view.extend({
 		if (!selectedcolumns.includes('ipaddr'))
 			o.modalonly = true;
 
-		o.textvalue = function(section_id) { const value=uci.get('apcontroller',section_id,'ipaddr')||'-', tag=subnetTag(value); return E('span',tag?{'class':'apc-subnet',title:'Podsieć: '+tag.label,style:'border-color:'+tag.color+';color:'+tag.color}:{},value); };
+		o.textvalue = function(section_id) { const value=uci.get('apcontroller',section_id,'ipaddr')||'-', tag=subnetTag(value); return E('span',tag?{'class':'apc-subnet',title:'PodsieÄ‡: '+tag.label,style:'border-color:'+tag.color+';color:'+tag.color}:{},value); };
 		let ipaddrs = {};
 
 		Object.keys(hosts).forEach(mac => {
@@ -2938,23 +2938,23 @@ return view.extend({
 		).forEach(([key, value]) => {
 			o.value(key, value);
 		});
-		o=s.option(form.DynamicList,'native_subnet',_('Natywne podsieci'),_('Adresy z pozostałych podsieci są oznaczone kolorami.'));o.datatype='cidr4';o.default=['10.48.18.0/24'];
-		s=m.section(form.GridSection,'vpn',_('Profile VPN'),_('Profile odpowiadają interfejsom i strefom firewalla. Różne, nienakładające się sieci mogą działać równocześnie.'));s.anonymous=false;s.addremove=true;s.nodescriptions=true;s.addbtntitle=_('Dodaj profil VPN');
-		o=s.option(form.Value,'name',_('Nazwa wyświetlana'));o.rmempty=false;
-		o=s.option(form.ListValue,'type',_('Typ'));o.value('existing','Istniejący interfejs SSTP / WireGuard');o.value('ikev2','IKEv2 — certyfikat klienta');o.default='ikev2';o.rmempty=false;o.textvalue=function(id){return uci.get('apcontroller',id,'type')==='ikev2'?'IKEv2 / certyfikat':'Istniejący interfejs';};
+		o=s.option(form.DynamicList,'native_subnet',_('Natywne podsieci'),_('Adresy z pozostaĹ‚ych podsieci sÄ… oznaczone kolorami.'));o.datatype='cidr4';o.default=['10.48.18.0/24'];
+		s=m.section(form.GridSection,'vpn',_('Profile VPN'),_('Profile odpowiadajÄ… interfejsom i strefom firewalla. RĂłĹĽne, nienakĹ‚adajÄ…ce siÄ™ sieci mogÄ… dziaĹ‚aÄ‡ rĂłwnoczeĹ›nie.'));s.anonymous=false;s.addremove=true;s.nodescriptions=true;s.addbtntitle=_('Dodaj profil VPN');
+		o=s.option(form.Value,'name',_('Nazwa wyĹ›wietlana'));o.rmempty=false;
+		o=s.option(form.ListValue,'type',_('Typ'));o.modalonly=true;o.value('existing','IstniejÄ…cy interfejs SSTP / WireGuard');o.value('ikev2','IKEv2 â€” certyfikat klienta');o.default='ikev2';o.rmempty=false;o.textvalue=function(id){return uci.get('apcontroller',id,'type')==='ikev2'?'IKEv2 / certyfikat':'IstniejÄ…cy interfejs';};
 		o=s.option(form.Flag,'enabled',_('Autostart VPN'));o.default='0';o.rmempty=false;
-		o=s.option(form.Value,'interface',_('Interfejs'));o.datatype='uciname';o.rmempty=false;
-		o=s.option(form.Value,'zone',_('Strefa firewalla'));o.datatype='uciname';o.rmempty=false;
-		o=s.option(form.Value,'local_subnet',_('Sieć MARM'));o.datatype='cidr4';o.default='10.48.18.0/24';o.rmempty=false;o.modalonly=true;
-		o=s.option(form.Value,'remote_subnet',_('Zdalna podsieć'));o.datatype='cidr4';o.rmempty=false;
-		o=s.option(form.ListValue,'mode',_('Kierunek inicjowania'));o.value('marm-only','Tylko MARM do zdalnej sieci');o.value('both','Obie strony (wymaga obsługi po stronie serwera)');o.default='marm-only';o.rmempty=false;o.textvalue=function(id){return uci.get('apcontroller',id,'mode')==='both'?'Obie strony':'Tylko MARM';};
-		for(const [key,label] of [['server','Serwer VPN'],['remote_id','Tożsamość serwera'],['cert','Certyfikat klienta'],['ca','Certyfikat CA'],['key','Plik klucza prywatnego']]) {o=s.option(form.Value,key,_(label));o.depends('type','ikev2');o.modalonly=true;o.rmempty=false;}
+		o=s.option(form.Value,'interface',_('Interfejs'));o.modalonly=true;o.datatype='uciname';o.rmempty=false;
+		o=s.option(form.Value,'zone',_('Strefa firewalla'));o.modalonly=true;o.datatype='uciname';o.rmempty=false;
+		o=s.option(form.Value,'local_subnet',_('SieÄ‡ MARM'));o.datatype='cidr4';o.default='10.48.18.0/24';o.rmempty=false;o.modalonly=true;
+		o=s.option(form.Value,'remote_subnet',_('Zdalna podsieÄ‡'));o.datatype='cidr4';o.rmempty=false;
+		o=s.option(form.ListValue,'mode',_('Kierunek inicjowania'));o.value('marm-only','Tylko MARM do zdalnej sieci');o.value('both','Obie strony (wymaga obsĹ‚ugi po stronie serwera)');o.default='marm-only';o.rmempty=false;o.textvalue=function(id){return uci.get('apcontroller',id,'mode')==='both'?'Obie strony':'Tylko MARM';};
+		for(const [key,label] of [['server','Serwer VPN'],['remote_id','ToĹĽsamoĹ›Ä‡ serwera'],['cert','Certyfikat klienta'],['ca','Certyfikat CA'],['key','Plik klucza prywatnego']]) {o=s.option(form.Value,key,_(label));o.depends('type','ikev2');o.modalonly=true;o.rmempty=false;}
 		o=s.option(form.Value,'ifid',_('Identyfikator XFRM'));o.depends('type','ikev2');o.datatype='range(10,4095)';o.modalonly=true;o.rmempty=false;
 		o=s.option(form.DummyValue,'_vpnstatus',_('Stan'));o.cfgvalue=function(id){let states=[];try{states=JSON.parse(data[6].stdout||'[]');}catch(e){}return (states.find(p=>p.id===id)||{}).status||'Zapisz profil';};
-		o=s.option(form.DummyValue,'_vpnactions',_('Połączenie'));o.renderWidget=function(id){
-			const run=async action=>{try{await m.save();await uci.save();await uci.apply();const r=await fs.exec('/usr/bin/apcontroller-vpn',[action,id]);if(r.code)throw new Error(r.stderr||r.stdout||'Błąd VPN');ui.addNotification(null,E('p',r.stdout||'Gotowe'));}catch(e){ui.addNotification(null,E('p',e.message),'error');}};
-			return E('div',{'class':'apc-package-actions'},['apply','start','stop'].map(action=>E('button',{type:'button','class':'cbi-button',click:ui.createHandlerFn(this,run,action)},({apply:'Zastosuj profil',start:'Połącz',stop:'Rozłącz'})[action])).concat([E('a',{'class':'cbi-button',href:L.url('admin/network/network')},'Interfejsy'),E('a',{'class':'cbi-button',href:L.url('admin/network/firewall')},'Firewall')]));
-		};o.textvalue=function(id){return this.renderWidget(id);};
+		o=s.option(form.DummyValue,'_vpnactions',_('PoĹ‚Ä…czenie'));o.renderWidget=function(id,compact){
+			const run=async action=>{try{await m.save();await uci.save();await uci.apply();const r=await fs.exec('/usr/bin/apcontroller-vpn',[action,id]);if(r.code)throw new Error(r.stderr||r.stdout||'BĹ‚Ä…d VPN');ui.addNotification(null,E('p',r.stdout||'Gotowe'));}catch(e){ui.addNotification(null,E('p',e.message),'error');}};
+			return E('div',{'class':'apc-package-actions'},['apply','start','stop'].map(action=>E('button',{type:'button','class':'cbi-button',click:ui.createHandlerFn(this,run,action)},({apply:'Zastosuj profil',start:'PoĹ‚Ä…cz',stop:'RozĹ‚Ä…cz'})[action])).concat(compact?[]:[E('a',{'class':'cbi-button',href:L.url('admin/network/network')},'Interfejsy'),E('a',{'class':'cbi-button',href:L.url('admin/network/firewall')},'Firewall')]));
+		};o.textvalue=function(id){return this.renderWidget(id,true);};
 
 		/*
 		 * ADDITIONAL SCRIPT
@@ -3070,7 +3070,7 @@ return view.extend({
 
 		return m.render().then(root => {
 			root.classList.add('apcontroller-page');
-			root.prepend(E('style', {}, '.apcontroller-page{min-width:0;max-width:100%;margin-left:0}.apcontroller-page .cbi-tblsection{min-width:0;max-width:100%;overflow-x:auto}.apcontroller-page table{margin-left:0!important;width:100%;font-size:.9em}.apcontroller-page table th,.apcontroller-page table td{padding:7px 6px!important;vertical-align:middle;overflow-wrap:anywhere}.apcontroller-page td[data-name="name"]{max-width:190px}.apcontroller-page td[data-name="_status"],.apcontroller-page td[data-name="ipaddr"]{white-space:nowrap}.apcontroller-page .cbi-section-actions{white-space:nowrap}.apcontroller-page .apc-package-status{white-space:pre-wrap;overflow-wrap:anywhere;max-height:250px;overflow:auto}.apc-package-actions{display:flex;gap:8px;flex-wrap:wrap}.apc-client-summary{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.apc-client-summary>div{border:1px solid var(--border-color-medium);border-radius:6px;padding:8px 16px;display:flex;gap:12px;align-items:center}.apc-client-summary strong{font-size:1.35em}.apc-subnet{border-left:4px solid;padding:2px 7px;border-radius:3px;display:inline-block}.apc-subnet-legend{display:flex;gap:14px;flex-wrap:wrap}'));
+			root.prepend(E('style', {}, '.apcontroller-page{min-width:0;max-width:100%;margin-left:0}.apcontroller-page .cbi-tblsection{min-width:0;max-width:100%;overflow-x:auto}.apcontroller-page table{margin-left:0!important;width:100%;font-size:.9em}.apcontroller-page table th,.apcontroller-page table td{padding:7px 6px!important;vertical-align:middle;overflow-wrap:anywhere}.apcontroller-page td[data-name="name"]{max-width:190px}.apcontroller-page td[data-name="_status"],.apcontroller-page td[data-name="ipaddr"]{white-space:nowrap}.apcontroller-page .cbi-section-actions{white-space:nowrap}.apcontroller-page .apc-package-status{white-space:pre-wrap;overflow-wrap:anywhere;max-height:250px;overflow:auto}.apc-package-actions{display:flex;gap:8px;flex-wrap:wrap}.apc-client-summary{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.apc-client-summary>div{border:1px solid var(--border-color-medium);border-radius:6px;padding:8px 16px;display:flex;gap:12px;align-items:center}.apc-client-summary strong{font-size:1.35em}.apc-subnet{border-left:4px solid;padding:2px 7px;border-radius:3px;display:inline-block}.apc-subnet-legend{display:flex;gap:14px;flex-wrap:wrap}#cbi-apcontroller-vpn table{min-width:880px}#cbi-apcontroller-vpn table td,#cbi-apcontroller-vpn table th{overflow-wrap:normal;word-break:normal}#cbi-apcontroller-vpn td[data-name=remote_subnet]{white-space:nowrap}#cbi-apcontroller-vpn .apc-package-actions{gap:4px;min-width:160px}'));
 			root.querySelectorAll('#cbi-apcontroller-host table').forEach(table => { if (table.parentElement.id !== 'cbi-apcontroller-host') return; const wrap=E('div', {'class':'apc-table-scroll',style:'max-width:100%;overflow-x:auto'}); table.before(wrap); wrap.appendChild(table); });
 			return root;
 		});

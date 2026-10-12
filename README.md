@@ -81,3 +81,7 @@ Zakładka Profile VPN zastępuje pojedynczy panel Zacisza. Każdy profil ma nazw
 IKEv2 wykorzystuje strongSwan, certyfikat klienta i CA, przydzielony adres VPN oraz osobny interfejs XFRM. Ścieżki wskazują prywatne pliki w /etc/swanctl; pakiet nie dostarcza certyfikatów ani kluczy użytkownika. Ten wariant klienta udostępnia dostęp inicjowany z LAN przez SNAT do przydzielonego adresu VPN. Dostęp inicjowany przez serwer wymaga uzgodnionej konfiguracji site-to-site po jego stronie; nie można uzyskać go samą zmianą opcji klienta. Istniejący SSTP/WireGuard może korzystać z obu kierunków, gdy zdalny router ma trasę powrotną.
 
 Na routerze z załadowanym crypto_safexcel uruchomienie IKE jest blokowane do zaplanowanego restartu, aby nie odtworzyć zdiagnozowanego zawieszenia. Profile można zapisać bez uruchamiania połączenia. Nowe skrypty, konfiguracja APController i prywatne pliki /etc/swanctl trafiają do listy backupu sysupgrade. Kopia zawiera sekrety VPN i powinna pozostać prywatna.
+
+## Wydanie 20261012-r7
+
+Zwężono tabelę profili VPN; typ, interfejs i strefa są dostępne w edycji profilu. Podsieci zachowują czytelny zapis, a tabela przewija się we własnym obszarze przy małej szerokości ekranu.
