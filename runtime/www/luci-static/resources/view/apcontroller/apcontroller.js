@@ -2917,7 +2917,7 @@ return view.extend({
 		o.renderWidget = function() {
 			const status=E('p', {}, data[6].stdout.trim()==='0'?'Tylko MARM inicjuje dostęp do Zacisza':data[6].stdout.trim()==='1'?'Obie sieci mogą inicjować połączenia':'Tunel nie jest skonfigurowany');
 			const run=async function(mode) {try {const r=await fs.exec('/usr/sbin/zacisze-vpn-mode',[mode]);if(r.code)throw new Error(r.stderr||'Błąd zmiany trybu');status.textContent=mode==='marm-only'?'Tylko MARM inicjuje dostęp do Zacisza':'Obie sieci mogą inicjować połączenia';}catch(e){ui.addNotification(null,E('p',e.message));}};
-			return E('div', {}, [status,E('div', {'class':'apc-package-actions'}, [E('button',{type:'button','class':'cbi-button',disabled:!data[6].stdout.trim(),click:ui.createHandlerFn(this,run,'marm-only')},_('Tylko MARM do Zacisze')),E('button',{type:'button','class':'cbi-button',disabled:!data[6].stdout.trim(),click:ui.createHandlerFn(this,run,'both')},_('Dostęp w obu kierunkach'))])]);
+			return E('div', {}, [status,E('div', {'class':'apc-package-actions'}, [E('button',{type:'button','class':'cbi-button',...(data[6].stdout.trim()?{}:{disabled:true}),click:ui.createHandlerFn(this,run,'marm-only')},_('Tylko MARM do Zacisze')),E('button',{type:'button','class':'cbi-button',...(data[6].stdout.trim()?{}:{disabled:true}),click:ui.createHandlerFn(this,run,'both')},_('Dostęp w obu kierunkach'))])]);
 		};
 
 		/*

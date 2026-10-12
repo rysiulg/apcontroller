@@ -67,3 +67,7 @@ Nazwy klientów mogą pochodzić z DHCP MikroTika. Opcjonalne prywatne `/etc/apc
 LuCI pokazuje tryb istniejącego tunelu MARM–Zacisze i pozwala przełączyć kierunek inicjowania połączeń, jeśli zainstalowano prywatny helper `/usr/sbin/zacisze-vpn-mode`. Pakiet nie instaluje certyfikatów ani konfiguracji VPN.
 
 Aktualizacje są obsługiwane w natywnym menedżerze APK/LuCI. Repozytorium: `https://nas.marm.pl/openwrt/ap_repos/apcontroller/aarch64_cortex-a53/packages.adb`, zapisane w `/etc/apk/repositories.d/apcontroller.list`. Nie trzeba osobnego panelu aktualizacji w APControllerze. Lista skanu pozostaje prywatnym materiałem audytu; interfejs pokazuje właściwą listę AP i bieżące dane.
+
+## Wydanie 20261012-r5
+
+Poprawiono dostępność przycisków wyboru kierunku VPN w LuCI. Bieżący tryb nie zmienia się podczas instalacji ani odświeżania strony.
