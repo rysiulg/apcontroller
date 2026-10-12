@@ -60,6 +60,8 @@ function hostStatus(records, section_id) {
 	let lastContact_ts = -1;
 
 	const obj = records.find(item => item && item.section === section_id);
+	if (obj && obj.verification) return E('span', {title:_('Zapis danych z VPN, odpytywanie wyłączone'),style:'color:#8a6800'},_('Weryfikacja'));
+	if (obj && !obj.enabled) return E('span', { 'style': 'color: gray' }, _('Disabled'));
 
 	if (obj) {
 		lastContact = obj['.lastcontact'];
@@ -84,7 +86,8 @@ function hostStatus(records, section_id) {
 
 function hostInfo(key, records, section_id) {
 	const obj = records.find(item => item && item.section === section_id);
-	const data = obj ? (obj[key] ? obj[key] : '-') : '-';
+	if (key === 'lastcontact' && obj && obj['.lastcontact'] >= 0) return E('span', { title: obj.lastcontact }, '%s s'.format(obj['.lastcontact']));
+	const data = obj && obj[key] != null && obj[key] !== '' ? obj[key] : '-';
 
 	return E('span', data);
 }
@@ -96,7 +99,9 @@ return view.extend({
 			callHostHints(),
 			callAPController(),
 			L.resolveDefault(fs.read_direct(additionalScriptFile), ''),
-			uci.load('apcontroller')
+			uci.load('apcontroller'),
+			L.resolveDefault(fs.exec('/usr/bin/apcontroller-package', ['status']), {stdout: _('Package information unavailable')}),
+			L.resolveDefault(fs.read_direct('/etc/apcontroller/discovery.json'), '{}')
 		]);
 	},
 
@@ -2900,6 +2905,33 @@ return view.extend({
 		).forEach(([key, value]) => {
 			o.value(key, value);
 		});
+		o = s.option(form.DummyValue, '_packages', _('Pakiety i aktualizacje APK'));
+		o.write = function() {}; o.remove = function() {};
+		o.renderWidget = function() {
+			const output = E('pre', { 'class': 'apc-package-status' }, data[4].stdout || '');
+			const run = async (action, ev) => {
+				const button=ev.currentTarget; button.disabled = true;
+				try { const result = await fs.exec('/usr/bin/apcontroller-package', [action]); output.textContent = (result.stdout || '') + (result.stderr || ''); }
+				catch (err) { output.textContent = err.message || String(err); }
+				finally { button.disabled = false; }
+			};
+			return E('div', {}, [E('p', {}, [E('a', {href:'https://nas.marm.pl/openwrt/ap_repos/apcontroller/README.md',target:'_blank',rel:'noopener noreferrer'}, _('Repozytorium i instrukcja')), ' · ', E('a', {href:L.url('admin/system/package-manager')}, _('Menedżer pakietów'))]), output,
+				E('div', {'class':'apc-package-actions'}, [E('button', {type:'button','class':'cbi-button',click:ui.createHandlerFn(this,run,'check')}, _('Sprawdź aktualizacje')), E('button', {type:'button','class':'cbi-button cbi-button-primary',click:ui.createHandlerFn(this,run,'upgrade')}, _('Aktualizuj APController')), E('button', {type:'button','class':'cbi-button',click:ui.createHandlerFn(this,run,'status')}, _('Odśwież stan'))])]);
+		};
+		s = m.section(form.NamedSection, 'discovery', 'discovery', _('Weryfikacja VPN Zacisze'));
+		s.addremove = false;
+		o = s.option(form.DummyValue, '_inventory', _('Wykryte urządzenia'));
+		o.write = function() {}; o.remove = function() {};
+		o.renderWidget = function() {
+			let inventory = {}; try { inventory = JSON.parse(data[5]); } catch (err) {}
+			const rows = (inventory.devices || []).map(device => {
+				const h = device.normalized || {}, count = ['2g','5g','6g'].reduce((n,b)=>n+(h['clientslist'+b]||[]).length,0);
+				return [device.ip, h.hostname || device.web?.title || '-', h.model || '-', h.platform || device.kind || '-', device.ports.join(', '), h.mac ? String(count) : '-', E('button', {type:'button','class':'cbi-button',click:()=>ui.showModal(device.ip,[E('pre',{style:'white-space:pre-wrap;max-height:65vh;overflow:auto'},JSON.stringify(device,null,2)),E('button',{type:'button','class':'cbi-button',click:ui.hideModal},_('Dismiss'))])},_('Dane'))];
+			});
+			const table = E('table', {'class':'table'}, [E('tr',{'class':'tr table-titles'},['IP','Nazwa','Model','Platforma','Porty','Klienci',''].map(title=>E('th',{'class':'th'},title)))]);
+			cbi_update_table(table,rows);
+			return E('div',{},[E('p',{},'Odczyt przez VPN: '+(inventory.collected_at||'-')+'. To zapis do weryfikacji, nie bieżący stan. Odpytywanie z routera wymaga jego własnej trasy VPN.'),E('div',{style:'max-width:100%;overflow-x:auto'},[table])]);
+		};
 
 		/*
 		 * ADDITIONAL SCRIPT
@@ -3013,7 +3045,12 @@ return view.extend({
 			63
 		);
 
-		return m.render();
+		return m.render().then(root => {
+			root.classList.add('apcontroller-page');
+			root.prepend(E('style', {}, '.apcontroller-page{min-width:0;max-width:100%;margin-left:0}.apcontroller-page .cbi-tblsection{min-width:0;max-width:100%;overflow-x:auto}.apcontroller-page table{margin-left:0!important;width:100%;font-size:.9em}.apcontroller-page table th,.apcontroller-page table td{padding:7px 6px!important;vertical-align:middle;overflow-wrap:anywhere}.apcontroller-page td[data-name="name"]{max-width:190px}.apcontroller-page td[data-name="_status"],.apcontroller-page td[data-name="ipaddr"]{white-space:nowrap}.apcontroller-page .cbi-section-actions{white-space:nowrap}.apcontroller-page .apc-package-status{white-space:pre-wrap;overflow-wrap:anywhere;max-height:250px;overflow:auto}.apc-package-actions{display:flex;gap:8px;flex-wrap:wrap}'));
+			root.querySelectorAll('#cbi-apcontroller-host table').forEach(table => { if (table.parentElement.id !== 'cbi-apcontroller-host') return; const wrap=E('div', {'class':'apc-table-scroll',style:'max-width:100%;overflow-x:auto'}); table.before(wrap); wrap.appendChild(table); });
+			return root;
+		});
 	},
 
 	addFooter: function() {

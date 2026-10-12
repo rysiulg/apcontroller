@@ -4,6 +4,7 @@
 		"read": {
 			"file": {
 				"/etc/crontabs/root": [ "read" ],
+				"/etc/apcontroller/discovery.json": [ "read" ],
 				"/usr/share/apcontroller/apcontroller.user": [ "read" ]
 			},
 			"ubus": {
@@ -18,6 +19,7 @@
 				"/etc/crontabs/root": [ "write" ],
 				"/etc/init.d/cron reload": [ "exec" ],
 				"/usr/bin/apcontroller": [ "exec" ],
+				"/usr/bin/apcontroller-package": [ "exec" ],
 				"/usr/bin/apcontroller-sendconfig": [ "exec" ],
 				"/usr/bin/scp": [ "exec" ],
 				"/usr/bin/ssh": [ "exec" ],

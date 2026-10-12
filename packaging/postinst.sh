@@ -12,7 +12,9 @@ printf '*/%s * * * * /usr/bin/apcontroller\n' "$interval" >> /etc/crontabs/root.
 chmod 600 /etc/crontabs/root.apcontroller.tmp
 mv /etc/crontabs/root.apcontroller.tmp /etc/crontabs/root
 touch /etc/sysupgrade.conf
-grep -qxF '/etc/apcontroller/' /etc/sysupgrade.conf || echo '/etc/apcontroller/' >> /etc/sysupgrade.conf
+for path in /etc/config/apcontroller /etc/apcontroller/ /etc/apk/repositories.d/apcontroller.list /etc/apk/keys/apcontroller-local.pem /usr/bin/apcontroller /usr/bin/apcontroller-sendconfig /usr/bin/apcontroller-package /usr/libexec/rpcd/apcontroller /usr/share/apcontroller/ /www/luci-static/resources/view/apcontroller/ /usr/share/rpcd/acl.d/luci-app-apcontroller.json /usr/share/luci/menu.d/luci-app-apcontroller.json; do
+    grep -qxF "$path" /etc/sysupgrade.conf || echo "$path" >> /etc/sysupgrade.conf
+done
 rm -f /tmp/luci-indexcache /tmp/luci-modulecache/*apcontroller*
 /etc/init.d/rpcd restart
 /etc/init.d/cron reload

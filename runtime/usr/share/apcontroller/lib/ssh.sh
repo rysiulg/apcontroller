@@ -34,6 +34,7 @@ apc_ssh_options()
 		"-o" "ConnectTimeout=5" \
 		"-o" "ServerAliveInterval=5" \
 		"-o" "ServerAliveCountMax=2" \
+		"-o" "HostKeyAlgorithms=+ssh-rsa" \
 		"-o" "StrictHostKeyChecking=accept-new" \
 		"-o" "UserKnownHostsFile=/etc/apcontroller/known_hosts" \
 		"-p" "$port"
@@ -99,7 +100,7 @@ apc_ssh_exec()
 		command -v sshpass >/dev/null 2>&1
 	then
 
-		sshpass -p "$password" \
+		SSHPASS="$password" sshpass -e \
 			ssh $args \
 			"$username@$host" \
 			"$command"
@@ -168,7 +169,7 @@ apc_ssh_pipe()
 		command -v sshpass >/dev/null 2>&1
 	then
 
-		sshpass -p "$password" \
+		SSHPASS="$password" sshpass -e \
 			ssh $args \
 			"$username@$host" \
 			"$command"

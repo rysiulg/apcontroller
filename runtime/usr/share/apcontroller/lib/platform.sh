@@ -14,6 +14,7 @@ PLATFORMFOLDER="${BASEFOLDER}/platforms"
 
 . "${LIBFOLDER}/common.sh"
 . "${LIBFOLDER}/ssh.sh"
+. "${LIBFOLDER}/vendor.sh"
 
 
 ###############################################################################
@@ -105,6 +106,11 @@ apc_platform_detect_one()
 	local result
 
 	apc_platform_load "$platform" || return 1
+	if [ "$platform" = omada ]; then
+		result="$(apc_platform_omada_detect_local "$host" "$port" "$username" "$password" "$keyfile" "$usekeyfile")" || return 1
+		[ "$result" = OMADA ] && { echo omada; return 0; }
+		return 1
+	fi
 
 	function="apc_platform_${platform}_detect"
 
@@ -976,6 +982,9 @@ apc_platform_execute()
 	[ -n "$output" ] || return 1
 
 	platform_dir="${BASEFOLDER}/platforms/${platform}"
+	if [ "$action" = poll ]; then
+		case "$platform" in ubiquiti|omada) apc_vendor_poll "$platform" "$ipaddr" "$port" "$username" "$password" "$keyfile" "$usekeyfile" "$output"; return $?;; esac
+	fi
 
 	defplatform="${platform_dir}/defplatform.sh"
 	agent="${platform_dir}/agent.sh"

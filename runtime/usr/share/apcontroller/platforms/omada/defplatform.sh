@@ -70,7 +70,7 @@ apc_platform_omada_detect_local()
 			-ttl 20 \
 			ssh -tt \
 				-i "$keyfile" \
-				$(apc_ssh_options omada) \
+				$(apc_ssh_options "$port" "$keyfile" "$usekeyfile") \
 				-p "$port" \
 				"$username@$ipaddr"
 
@@ -80,7 +80,7 @@ apc_platform_omada_detect_local()
 			-t 10 \
 			-ttl 20 \
 			ssh -tt \
-				$(apc_ssh_options omada) \
+				$(apc_ssh_options "$port" "$keyfile" "$usekeyfile") \
 				-o PreferredAuthentications=password \
 				-o PubkeyAuthentication=no \
 				-p "$port" \

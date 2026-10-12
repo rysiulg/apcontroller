@@ -17,7 +17,7 @@ cp "$tmp/key.pem" /etc/apk/keys/apcontroller-local.pem
 chmod 644 /etc/apk/keys/apcontroller-local.pem
 apk verify "$tmp/packages.adb"
 cp -p /etc/apk/world "$tmp/world.before"
-awk '{if ($0 ~ /^apcontroller[<>=~]/) print "apcontroller"; else if ($0 ~ /^luci-app-apcontroller[<>=~]/) print "luci-app-apcontroller"; else if ($0 ~ /^luci-i18n-apcontroller-pl[<>=~]/) print "luci-i18n-apcontroller-pl"; else print}' /etc/apk/world > "$tmp/world"
+awk '{if ($0 ~ /^(apcontroller|luci-apcontroller|luci-app-apcontroller|luci-i18n-apcontroller-pl)[<>=~]/) sub(/[<>=~].*/, ""); print}' /etc/apk/world > "$tmp/world"
 cp "$tmp/world" /etc/apk/world
 if [ -f /etc/apk/repositories.d/customfeeds.list ]; then
     awk '!/raw.github(usercontent)?.com\/rysiulg\/apcontroller/' /etc/apk/repositories.d/customfeeds.list > "$tmp/customfeeds.list"
@@ -25,7 +25,7 @@ if [ -f /etc/apk/repositories.d/customfeeds.list ]; then
 fi
 printf '%s/%s/packages.adb\n' "$BASE" "$ARCH" > /etc/apk/repositories.d/apcontroller.list
 apk update
-apk add --upgrade apcontroller luci-app-apcontroller luci-i18n-apcontroller-pl
+apk add --upgrade luci-apcontroller apcontroller luci-app-apcontroller luci-i18n-apcontroller-pl
 completed=1
 rm -f /etc/apk/keys/rysiulg-apcontroller.rsa.pub
 echo 'APController installed. Reopen its LuCI page.'

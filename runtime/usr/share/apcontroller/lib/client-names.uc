@@ -4,6 +4,9 @@ import { connect } from 'ubus';
 import { cursor } from 'uci';
 let data = json(readfile('/dev/stdin'));
 let cfg = cursor(), bus = connect(), hints = {}, aliases = {}, reservations = {};
+let snapshots={}, verified={};
+try { for(let d in json(readfile('/etc/apcontroller/discovery.json')).devices||[]) if(d.normalized)snapshots[d.ip]=d.normalized; } catch(e) {}
+cfg.foreach('apcontroller','host',(section)=>{if(section.verification=='1')verified[section['.name']]=true;});
 try { hints = bus.call('luci-rpc', 'getHostHints', {}) || {}; } catch (e) {}
 function validName(value) {
     return type(value) == 'string' && trim(value) != '' && value != '*' && value != 'unknown';
@@ -18,6 +21,11 @@ cfg.foreach('apcontroller', 'client', (section) => collectNames(aliases, section
 let bands = ['2g', '5g', '6g'];
 for (let i = 0; i < length(data.hosts || []); i++) {
     let host = data.hosts[i];
+    if(verified[host.section] && !host.enabled && snapshots[host.ipaddr]) {
+        for(let k,v in snapshots[host.ipaddr]) if(k!='ipaddr' && k!='platform')host[k]=v;
+        host.platform=snapshots[host.ipaddr].platform;host.verification=true;host.online=0;
+        for(let b in ['2g','5g','6g'])host['clients'+b]=length(host['clientslist'+b]||[]);
+    }
     host['.lastcontact'] = host.lastcontact ?? -1;
     for (let b = 0; b < length(bands); b++) {
         let clients = host['clientslist' + bands[b]] || [];

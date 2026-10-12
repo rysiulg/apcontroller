@@ -10,7 +10,7 @@ KEY="$WORK/.signing/apcontroller-local.pem"
 OUT="$WORK/releases/$VERSION"
 STAGE="$WORK/stage/$VERSION"
 umask 077
-mkdir -p "$WORK/.signing" "$OUT/$ARCH" "$OUT/keys" "$STAGE/apcontroller" "$STAGE/luci-app-apcontroller" "$STAGE/luci-i18n-apcontroller-pl"
+mkdir -p "$WORK/.signing" "$OUT/$ARCH" "$OUT/keys" "$STAGE/apcontroller" "$STAGE/luci-app-apcontroller" "$STAGE/luci-i18n-apcontroller-pl" "$STAGE/luci-apcontroller/usr/share/apcontroller"
 chmod 700 "$WORK/.signing"
 if [ ! -s "$KEY" ]; then openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out "$KEY"; fi
 chmod 600 "$KEY"
@@ -33,6 +33,9 @@ chmod 755 "$STAGE/apcontroller/usr/bin/"* "$STAGE/apcontroller/usr/libexec/rpcd/
 "$APK" mkpkg --sign-key "$KEY" -I "name:apcontroller" -I "version:$VERSION" -I "arch:$ARCH" -I 'license:MIT' -I 'origin:apcontroller' -I 'description:AP controller with central client names and serialized polling' -I 'depends:libc busybox sshpass openssh-client ucode ucode-mod-fs ucode-mod-ubus ucode-mod-uci jsonfilter uci rpcd-mod-luci' -F "$STAGE/apcontroller" -s "post-install:$SOURCE/packaging/postinst.sh" -s "post-upgrade:$SOURCE/packaging/postinst.sh" -o "$OUT/$ARCH/apcontroller-$VERSION.apk"
 "$APK" mkpkg --sign-key "$KEY" -I "name:luci-app-apcontroller" -I "version:$VERSION" -I "arch:$ARCH" -I 'license:MIT' -I 'origin:apcontroller' -I 'description:LuCI AP controller and client aliases' -I "depends:libc luci-base apcontroller>=$VERSION" -F "$STAGE/luci-app-apcontroller" -o "$OUT/$ARCH/luci-app-apcontroller-$VERSION.apk"
 "$APK" mkpkg --sign-key "$KEY" -I "name:luci-i18n-apcontroller-pl" -I "version:$VERSION" -I "arch:$ARCH" -I 'license:MIT' -I 'origin:apcontroller' -I 'description:Polish translation of AP controller' -I "depends:libc luci-app-apcontroller>=$VERSION" -F "$STAGE/luci-i18n-apcontroller-pl" -o "$OUT/$ARCH/luci-i18n-apcontroller-pl-$VERSION.apk"
+printf '%s\n' "$VERSION" > "$STAGE/luci-apcontroller/usr/share/apcontroller/package-alias"
+chmod 644 "$STAGE/luci-apcontroller/usr/share/apcontroller/package-alias"
+"$APK" mkpkg --sign-key "$KEY" -I 'name:luci-apcontroller' -I "version:$VERSION" -I "arch:$ARCH" -I 'license:MIT' -I 'origin:apcontroller' -I 'description:APController complete LuCI installation' -I "depends:apcontroller>=$VERSION luci-app-apcontroller>=$VERSION luci-i18n-apcontroller-pl>=$VERSION" -F "$STAGE/luci-apcontroller" -o "$OUT/$ARCH/luci-apcontroller-$VERSION.apk"
 "$APK" mkndx --keys-dir "$OUT/keys" --sign-key "$KEY" --description "APController $VERSION" --output "$OUT/$ARCH/packages.adb" "$OUT/$ARCH/"*.apk
 KEY_HASH=$(sha256sum "$OUT/keys/apcontroller-local.pem" | awk '{print $1}')
 sed "s/@KEY_HASH@/$KEY_HASH/g" "$SOURCE/packaging/install.sh.in" > "$OUT/install.sh"

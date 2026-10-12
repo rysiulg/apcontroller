@@ -15,7 +15,7 @@ Instalator sprawdza sumę klucza publicznego i podpis indeksu APK, usuwa przypi�
 
 ```sh
 apk update
-apk add --upgrade apcontroller luci-app-apcontroller luci-i18n-apcontroller-pl
+apk add --upgrade luci-apcontroller
 ```
 
 Główny feed: `https://nas.marm.pl/openwrt/ap_repos/apcontroller/aarch64_cortex-a53/packages.adb`. Pakiety, klucz publiczny i `SHA256SUMS` są dostępne obok instalatora. Starsze wydania pozostają w `releases/`. Repozytorium nie zawiera konfiguracji sieci, haseł ani klucza podpisującego.
@@ -47,3 +47,13 @@ Po testach kopiuj nowe pliki `.apk`, klucz publiczny i instalator do katalogu re
 Obsługa różnych producentów nadal zależy od ich dostępności, poprawnych danych logowania, wykrywania platformy i zgodności schematu. Ten zestaw poprawek nie implementuje kompletnego zarządzania Omada/MikroTik ani automatycznej migracji ich adresów. Szablony agenta push/HTTP wymagają osobnej integracji z cachem używanym przez status RPC. Nie uruchamiaj grupy z opcją usuwania wszystkich sieci Wi-Fi podczas samego audytu.
 
 Dokumentacja formatu: [apk mkpkg](https://raw.githubusercontent.com/alpinelinux/apk-tools/v3.0.8/doc/apk-mkpkg.8.scd), [apk mkndx](https://raw.githubusercontent.com/alpinelinux/apk-tools/v3.0.8/doc/apk-mkndx.8.scd).
+
+## Wydanie 20261012-r2
+
+Dodano pakiet zbiorczy luci-apcontroller, który instaluje backend, LuCI i tłumaczenie. Dotychczasowe nazwy pakietów pozostają zgodne z istniejącymi instalacjami. W LuCI, zakładka Ustawienia, znajduje się stan pakietów, adres feedu oraz przyciski sprawdzania i uruchamiania aktualizacji. Aktualizacja działa w tle; przycisk Odśwież stan pokazuje jej wynik.
+
+Tabela urządzeń ma mniejsze odstępy i własne przewijanie, bez rozszerzania całej strony. Szerokość można dodatkowo ograniczyć wyborem kolumn w Ustawieniach. Czas ostatniego kontaktu w tabeli jest krótki, a dokładna data dostępna w podpowiedzi.
+
+Parser vendor-status.uc obsługuje JSON UniFi, status i stacje airOS oraz tekst CLI Omada. Dane są składane przez serializer JSON; nazwy SSID nie są wklejane do JSON przez awk. Transport Omada wykonuje wyłącznie polecenia odczytu przez sexpect (dokumentacja: https://github.com/clarkwang/sexpect/blob/master/doc/sexpect.adoc). Odpytywanie tych platform nie instaluje agenta na AP. SSH dopuszcza dawny podpis klucza hosta RSA dla zgodności z Ubiquiti, zachowując weryfikację zapamiętanego klucza.
+
+Zakładka Weryfikacja VPN Zacisze wyświetla prywatny plik /etc/apcontroller/discovery.json. Wpisy importowane do weryfikacji mają wyłączone cykliczne odpytywanie i są oznaczone jako zapis danych, nie stan bieżący. Sam VPN na komputerze nie daje routerowi trasy do zdalnej sieci. Plik odkrywania, rzeczywiste próbki i hasła nie są częścią repozytorium.
