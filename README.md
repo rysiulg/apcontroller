@@ -85,3 +85,7 @@ Na routerze z załadowanym crypto_safexcel uruchomienie IKE jest blokowane do za
 ## Wydanie 20261012-r7
 
 Zwężono tabelę profili VPN; typ, interfejs i strefa są dostępne w edycji profilu. Podsieci zachowują czytelny zapis, a tabela przewija się we własnym obszarze przy małej szerokości ekranu.
+
+## Wydanie 20261012-r8
+
+Przywrócono poprawne kodowanie UTF-8 polskich napisów w tabeli profili VPN.
