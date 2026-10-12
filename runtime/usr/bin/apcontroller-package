@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-if [ "${1:-status}" = upgrade ]; then nohup "$0" _upgrade > /tmp/apcontroller-package-upgrade.log 2>&1 < /dev/null & echo 'Aktualizacja uruchomiona. Odśwież stan pakietów, aby odczytać wynik.'; exit 0; fi
+if [ "${1:-status}" = upgrade ]; then setsid "$0" _upgrade > /tmp/apcontroller-package-upgrade.log 2>&1 < /dev/null & echo 'Aktualizacja uruchomiona. Odśwież stan pakietów, aby odczytać wynik.'; exit 0; fi
 if [ "${1:-status}" != status ]; then exec 8>/tmp/apcontroller-package.lock; flock -n 8 || { echo 'Another package operation is running.' >&2; exit 1; }; fi
 case "${1:-status}" in
     status) printf 'APController %s\n' "$(cat /usr/share/apcontroller/VERSION)"; apk list --installed apcontroller luci-app-apcontroller luci-i18n-apcontroller-pl luci-apcontroller; printf '\n'; cat /etc/apk/repositories.d/apcontroller.list; if [ -f /tmp/apcontroller-package-upgrade.log ]; then printf '\nOstatnia aktualizacja:\n'; tail -n 25 /tmp/apcontroller-package-upgrade.log; fi;;
