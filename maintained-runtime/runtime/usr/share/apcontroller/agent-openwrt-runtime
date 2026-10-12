@@ -1,0 +1,141 @@
+#!/bin/sh
+
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+
+APCONTROLLER_CONTROLLER=""
+APCONTROLLER_API_PORT=""
+APCONTROLLER_API_PATH=""
+APCONTROLLER_API_KEY=""
+APCONTROLLER_INTERVAL=""
+APCONTROLLER_DEBUG="1"
+
+AGENT_COLLECTOR='__AGENT_COLLECTOR__'
+
+
+log()
+{
+	[ "$APCONTROLLER_DEBUG" = "1" ] || return 0
+
+	logger -t apcontroller-agent "$*"
+}
+
+
+md5()
+{
+	md5sum "$1" 2>/dev/null |
+		awk '{print $1}'
+}
+
+
+collect()
+{
+	#
+	# Collector is embedded below.
+	#
+
+	__COLLECTOR__
+}
+
+
+send_http()
+{
+	json="$1"
+
+	url="http://${APCONTROLLER_CONTROLLER}:${APCONTROLLER_API_PORT}${APCONTROLLER_API_PATH}"
+
+	#
+	# curl
+	#
+
+	if command -v curl >/dev/null 2>&1; then
+
+		curl -sS \
+			--connect-timeout 5 \
+			--max-time 15 \
+			-H "Content-Type: application/json" \
+			-H "X-APController-Key: ${APCONTROLLER_API_KEY}" \
+			-X POST \
+			--data "$json" \
+			"$url" 2>/dev/null
+
+		return $?
+	fi
+
+
+	#
+	# wget
+	#
+
+	if command -v wget >/dev/null 2>&1; then
+
+		printf '%s' "$json" |
+		wget -q \
+			--timeout=5 \
+			--tries=1 \
+			--header="Content-Type: application/json" \
+			--header="X-APController-Key: ${APCONTROLLER_API_KEY}" \
+			--post-file=- \
+			-O - \
+			"$url" 2>/dev/null
+
+		return $?
+	fi
+
+
+	return 127
+}
+
+
+send_ssh()
+{
+	json="$1"
+
+	#
+	# SSH fallback will be added in the next step.
+	#
+
+	return 1
+}
+
+
+poll()
+{
+	json="$(collect)"
+
+	[ -n "$json" ] || {
+		log "collector returned no data"
+		return 1
+	}
+
+	response="$(send_http "$json")"
+	rc=$?
+
+	if [ "$rc" -eq 0 ]; then
+		log "HTTP poll successful"
+		return 0
+	fi
+
+	log "HTTP unavailable, trying SSH"
+
+	send_ssh "$json"
+
+	return $?
+}
+
+
+case "$1" in
+
+	poll)
+		poll
+		;;
+
+	collect)
+		collect
+		;;
+
+	*)
+		echo "usage: $0 {poll|collect}" >&2
+		exit 1
+		;;
+
+esac

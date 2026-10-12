@@ -1,0 +1,57 @@
+#!/bin/sh
+
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+
+BASEFOLDER="/usr/share/apcontroller"
+LIBFOLDER="${BASEFOLDER}/lib"
+
+. "${LIBFOLDER}/rpc.sh"
+
+
+case "$1" in
+
+	list)
+
+		cat <<'EOF'
+{
+	"status": {},
+	"activity": {
+		"section": "string"
+	},
+	"scripts": {}
+}
+EOF
+		exit 0
+		;;
+
+	call)
+
+		case "$2" in
+
+			status)
+				rpc_status
+				exit $?
+				;;
+
+			activity)
+				rpc_activity
+				exit $?
+				;;
+
+			scripts)
+				rpc_scripts
+				exit $?
+				;;
+
+			*)
+				exit 1
+				;;
+
+		esac
+		;;
+
+	*)
+		exit 1
+		;;
+
+esac

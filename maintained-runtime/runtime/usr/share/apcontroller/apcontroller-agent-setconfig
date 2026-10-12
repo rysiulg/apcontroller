@@ -1,0 +1,78 @@
+#!/bin/sh
+
+FILE="$1"
+PLATFORM="$2"
+
+[ -s "$FILE" ] || exit 1
+
+
+#
+# Platform may be passed by apcontroller-send.
+#
+# If it wasn't, detect it locally.
+#
+if [ -z "$PLATFORM" ]; then
+
+	if [ -f /etc/openwrt_release ] ||
+	   [ -f /etc/openwrt_version ] ||
+	   command -v ubus >/dev/null 2>&1; then
+
+		PLATFORM="openwrt"
+
+	elif command -v mca-cli >/dev/null 2>&1 ||
+	     command -v ubntbox >/dev/null 2>&1 ||
+	     [ -f /etc/ubnt_version ]; then
+
+		PLATFORM="ubiquiti"
+
+	elif command -v cliclientd >/dev/null 2>&1 ||
+	     [ -d /etc/omada ] ||
+	     [ -d /etc/tplink ]; then
+
+		PLATFORM="omada"
+
+	else
+		PLATFORM="unknown"
+	fi
+
+fi
+
+
+#
+# Select platform agent.
+#
+case "$PLATFORM" in
+
+	openwrt)
+		AGENT="/tmp/apcontroller-agent-setconfig-openwrt"
+		;;
+
+	ubiquiti)
+		AGENT="/tmp/apcontroller-agent-setconfig-ubiquiti"
+		;;
+
+	omada)
+		AGENT="/tmp/apcontroller-agent-setconfig-omada"
+		;;
+
+	*)
+		echo "apcontroller: unsupported platform: $PLATFORM" >&2
+		exit 2
+		;;
+
+esac
+
+
+#
+# Agent must exist.
+#
+[ -x "$AGENT" ] || {
+	echo "apcontroller: agent not found: $AGENT" >&2
+	exit 3
+}
+
+
+#
+# Execute platform-specific agent.
+#
+exec "$AGENT" "$FILE"
