@@ -13,12 +13,13 @@ apc_vendor_poll() (
         if grep -qi 'password:' "$raw/login"; then export APC_VENDOR_PASSWORD="$password"; sexpect send -enter -env APC_VENDOR_PASSWORD; unset APC_VENDOR_PASSWORD; sexpect expect -t 8 -re 'EAP[>#]' > "$raw/login" || exit 1; fi
         if ! grep -q 'EAP#' "$raw/login"; then sexpect send -enter enable; sexpect expect -t 8 -re 'EAP#' >/dev/null || exit 1; fi
         : > "$raw/cli"
-        for command in 'show version' 'show uptime' 'show network status' 'show wifi detail' 'show station info' 'show arp table'; do
+        for command in 'show version' 'show memory usage' 'show process resource' 'show uptime' 'show network status' 'show wifi detail' 'show station info' 'show arp table'; do
             sexpect send -enter "$command" || exit 1
             sexpect expect -t 10 -re 'EAP#' >> "$raw/cli" || exit 1
         done
         sexpect kill >/dev/null 2>&1 || true
     else
+        export APC_SSH_LEGACY=1
         apc_ssh_exec "$host" "$port" "$username" "$password" "$keyfile" "$usekeyfile" 'mca-dump 2>/dev/null' > "$raw/mca" 2>/dev/null || true
         if [ ! -s "$raw/mca" ]; then
             apc_ssh_exec "$host" "$port" "$username" "$password" "$keyfile" "$usekeyfile" 'ubntbox mca-status 2>/dev/null' > "$raw/air" 2>/dev/null || exit 1

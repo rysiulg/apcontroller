@@ -25,6 +25,8 @@ apc_ssh_options()
 	local port="$1"
 	local keyfile="$2"
 	local usekeyfile="$3"
+	local hostkeys='+ssh-rsa'
+	[ "${APC_SSH_LEGACY:-0}" = 1 ] && hostkeys='ssh-rsa'
 
 	[ -n "$port" ] || port=22
 	mkdir -p /etc/apcontroller; chmod 700 /etc/apcontroller
@@ -34,7 +36,7 @@ apc_ssh_options()
 		"-o" "ConnectTimeout=5" \
 		"-o" "ServerAliveInterval=5" \
 		"-o" "ServerAliveCountMax=2" \
-		"-o" "HostKeyAlgorithms=+ssh-rsa" \
+		"-o" "HostKeyAlgorithms=$hostkeys" \
 		"-o" "StrictHostKeyChecking=accept-new" \
 		"-o" "UserKnownHostsFile=/etc/apcontroller/known_hosts" \
 		"-p" "$port"

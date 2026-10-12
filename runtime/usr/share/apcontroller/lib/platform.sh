@@ -123,9 +123,11 @@ apc_platform_detect_one()
 	apc_debug platform \
 		"trying platform=$platform host=$host"
 
+	local legacy=0
+	[ "$platform" = ubiquiti ] && legacy=1
 	result="$(
 		printf '%s\n' "$script" |
-		apc_ssh_pipe \
+		APC_SSH_LEGACY="$legacy" apc_ssh_pipe \
 			"$host" \
 			"$port" \
 			"$username" \

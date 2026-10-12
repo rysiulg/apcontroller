@@ -57,3 +57,13 @@ Tabela urządzeń ma mniejsze odstępy i własne przewijanie, bez rozszerzania c
 Parser vendor-status.uc obsługuje JSON UniFi, status i stacje airOS oraz tekst CLI Omada. Dane są składane przez serializer JSON; nazwy SSID nie są wklejane do JSON przez awk. Transport Omada wykonuje wyłącznie polecenia odczytu przez sexpect (dokumentacja: https://github.com/clarkwang/sexpect/blob/master/doc/sexpect.adoc). Odpytywanie tych platform nie instaluje agenta na AP. SSH dopuszcza dawny podpis klucza hosta RSA dla zgodności z Ubiquiti, zachowując weryfikację zapamiętanego klucza.
 
 Zakładka Weryfikacja VPN Zacisze wyświetla prywatny plik /etc/apcontroller/discovery.json. Wpisy importowane do weryfikacji mają wyłączone cykliczne odpytywanie i są oznaczone jako zapis danych, nie stan bieżący. Sam VPN na komputerze nie daje routerowi trasy do zdalnej sieci. Plik odkrywania, rzeczywiste próbki i hasła nie są częścią repozytorium.
+
+## Wydanie 20261012-r4
+
+Odczyt UniFi/airOS przez SSH oraz Omada przez CLI: klienci, SSID, pasmo, sygnał, szybkości, liczniki pakietów i retries, CPU/pamięć oraz dostępne statystyki radia i interfejsów. Pola zależą od firmware urządzenia; brak danych nie jest zastępowany wynikiem pomiaru. Pełny odczyt znajduje się w „Więcej informacji → Dane diagnostyczne”. Nie są zmieniane ustawienia radia ani konfiguracja producenta.
+
+Nazwy klientów mogą pochodzić z DHCP MikroTika. Opcjonalne prywatne `/etc/apcontroller/zacisze-api.auth` zawiera `username` i `password` konta API tylko do odczytu. Odczyt 192.168.88.1:8728 odbywa się wyłącznie przy trasie przez sstp-zacisze; dane odświeżane są co 5 minut, a błąd nie usuwa ostatniego wyniku. Pliku uwierzytelnienia nie wolno publikować w repozytorium.
+
+LuCI pokazuje tryb istniejącego tunelu MARM–Zacisze i pozwala przełączyć kierunek inicjowania połączeń, jeśli zainstalowano prywatny helper `/usr/sbin/zacisze-vpn-mode`. Pakiet nie instaluje certyfikatów ani konfiguracji VPN.
+
+Aktualizacje są obsługiwane w natywnym menedżerze APK/LuCI. Repozytorium: `https://nas.marm.pl/openwrt/ap_repos/apcontroller/aarch64_cortex-a53/packages.adb`, zapisane w `/etc/apk/repositories.d/apcontroller.list`. Nie trzeba osobnego panelu aktualizacji w APControllerze. Lista skanu pozostaje prywatnym materiałem audytu; interfejs pokazuje właściwą listę AP i bieżące dane.

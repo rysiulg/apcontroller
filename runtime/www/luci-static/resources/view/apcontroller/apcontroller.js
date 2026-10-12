@@ -100,8 +100,9 @@ return view.extend({
 			callAPController(),
 			L.resolveDefault(fs.read_direct(additionalScriptFile), ''),
 			uci.load('apcontroller'),
-			L.resolveDefault(fs.exec('/usr/bin/apcontroller-package', ['status']), {stdout: _('Package information unavailable')}),
-			L.resolveDefault(fs.read_direct('/etc/apcontroller/discovery.json'), '{}')
+			Promise.resolve(null),
+			Promise.resolve(null),
+			L.resolveDefault(fs.exec('/usr/sbin/zacisze-vpn-mode', ['status']), {stdout:''})
 		]);
 	},
 
@@ -208,6 +209,7 @@ return view.extend({
 			'software': _('Software'),
 			'uptime': _('Uptime'),
 			'load': _('Load Average'),
+			'cpu': _('CPU (%)'), 'memory_total': _('Pamięć całkowita (B)'), 'memory_used': _('Pamięć użyta (B)'),
 			'clients2g': _('2.4 GHz Clients'),
 			'clients5g': _('5 GHz Clients'),
 			'clients6g': _('6 GHz Clients'),
@@ -227,7 +229,10 @@ return view.extend({
 			'signal': _('Signal'),
 			'connected': _('Connected'),
 			'rx': _('RX'),
-			'tx': _('TX')
+			'tx': _('TX'),
+			'rxrate': _('RX rate'), 'txrate': _('TX rate'), 'noise': _('Noise (dBm)'),
+			'tx_retries': _('TX retries'), 'rx_retries': _('RX retries'), 'tx_packets': _('TX packets'), 'rx_packets': _('RX packets'),
+			'wifi_tx_dropped': _('TX dropped'), 'name_source': _('Źródło nazwy')
 		};
 
 		function updateDeviceStatus(records) {
@@ -521,19 +526,21 @@ return view.extend({
 					];
 
 				case 'rx':
+					if (client.rx == null) return '-';
 					return [
 						client.rx,
 						'%1024.2mB'.format(client.rx) || '-'
 					];
 
 				case 'tx':
+					if (client.tx == null) return '-';
 					return [
 						client.tx,
 						'%1024.2mB'.format(client.tx) || '-'
 					];
 
 				default:
-					return client[key] || '-';
+					return client[key] == null || client[key] === '' ? '-' : client[key];
 				}
 			}
 
@@ -1289,7 +1296,7 @@ return view.extend({
 					let val =
 						host[key]
 							? host[key]
-							: '-';
+							: host[key] === 0 ? 0 : '-';
 
 					if (key == 'status')
 						val =
@@ -1329,6 +1336,7 @@ return view.extend({
 				_('More Information'),
 				[
 					table,
+					E('details', {}, [E('summary', {}, _('Dane diagnostyczne AP, radia i klientów')), E('p', {}, _('Liczniki retries są kumulacyjne; nie stanowią procentu strat. Brak pola oznacza brak danych ze sprzętu.')), E('pre', {style:'max-height:420px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere'}, JSON.stringify(host || {}, null, 2))]),
 					E(
 						'div',
 						{ 'class': 'right' },
@@ -2905,32 +2913,11 @@ return view.extend({
 		).forEach(([key, value]) => {
 			o.value(key, value);
 		});
-		o = s.option(form.DummyValue, '_packages', _('Pakiety i aktualizacje APK'));
-		o.write = function() {}; o.remove = function() {};
+		o = s.option(form.DummyValue, '_zaciszevpn', _('VPN MARM - Zacisze'));
 		o.renderWidget = function() {
-			const output = E('pre', { 'class': 'apc-package-status' }, data[4].stdout || '');
-			const run = async (action, ev) => {
-				const button=ev.currentTarget; button.disabled = true;
-				try { const result = await fs.exec('/usr/bin/apcontroller-package', [action]); output.textContent = (result.stdout || '') + (result.stderr || ''); }
-				catch (err) { output.textContent = err.message || String(err); }
-				finally { button.disabled = false; }
-			};
-			return E('div', {}, [E('p', {}, [E('a', {href:'https://nas.marm.pl/openwrt/ap_repos/apcontroller/README.md',target:'_blank',rel:'noopener noreferrer'}, _('Repozytorium i instrukcja')), ' · ', E('a', {href:L.url('admin/system/package-manager')}, _('Menedżer pakietów'))]), output,
-				E('div', {'class':'apc-package-actions'}, [E('button', {type:'button','class':'cbi-button',click:ui.createHandlerFn(this,run,'check')}, _('Sprawdź aktualizacje')), E('button', {type:'button','class':'cbi-button cbi-button-primary',click:ui.createHandlerFn(this,run,'upgrade')}, _('Aktualizuj APController')), E('button', {type:'button','class':'cbi-button',click:ui.createHandlerFn(this,run,'status')}, _('Odśwież stan'))])]);
-		};
-		s = m.section(form.NamedSection, 'discovery', 'discovery', _('Weryfikacja VPN Zacisze'));
-		s.addremove = false;
-		o = s.option(form.DummyValue, '_inventory', _('Wykryte urządzenia'));
-		o.write = function() {}; o.remove = function() {};
-		o.renderWidget = function() {
-			let inventory = {}; try { inventory = JSON.parse(data[5]); } catch (err) {}
-			const rows = (inventory.devices || []).map(device => {
-				const h = device.normalized || {}, count = ['2g','5g','6g'].reduce((n,b)=>n+(h['clientslist'+b]||[]).length,0);
-				return [device.ip, h.hostname || device.web?.title || '-', h.model || '-', h.platform || device.kind || '-', device.ports.join(', '), h.mac ? String(count) : '-', E('button', {type:'button','class':'cbi-button',click:()=>ui.showModal(device.ip,[E('pre',{style:'white-space:pre-wrap;max-height:65vh;overflow:auto'},JSON.stringify(device,null,2)),E('button',{type:'button','class':'cbi-button',click:ui.hideModal},_('Dismiss'))])},_('Dane'))];
-			});
-			const table = E('table', {'class':'table'}, [E('tr',{'class':'tr table-titles'},['IP','Nazwa','Model','Platforma','Porty','Klienci',''].map(title=>E('th',{'class':'th'},title)))]);
-			cbi_update_table(table,rows);
-			return E('div',{},[E('p',{},'Odczyt przez VPN: '+(inventory.collected_at||'-')+'. To zapis do weryfikacji, nie bieżący stan. Odpytywanie z routera wymaga jego własnej trasy VPN.'),E('div',{style:'max-width:100%;overflow-x:auto'},[table])]);
+			const status=E('p', {}, data[6].stdout.trim()==='0'?'Tylko MARM inicjuje dostęp do Zacisza':data[6].stdout.trim()==='1'?'Obie sieci mogą inicjować połączenia':'Tunel nie jest skonfigurowany');
+			const run=async function(mode) {try {const r=await fs.exec('/usr/sbin/zacisze-vpn-mode',[mode]);if(r.code)throw new Error(r.stderr||'Błąd zmiany trybu');status.textContent=mode==='marm-only'?'Tylko MARM inicjuje dostęp do Zacisza':'Obie sieci mogą inicjować połączenia';}catch(e){ui.addNotification(null,E('p',e.message));}};
+			return E('div', {}, [status,E('div', {'class':'apc-package-actions'}, [E('button',{type:'button','class':'cbi-button',disabled:!data[6].stdout.trim(),click:ui.createHandlerFn(this,run,'marm-only')},_('Tylko MARM do Zacisze')),E('button',{type:'button','class':'cbi-button',disabled:!data[6].stdout.trim(),click:ui.createHandlerFn(this,run,'both')},_('Dostęp w obu kierunkach'))])]);
 		};
 
 		/*

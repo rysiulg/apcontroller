@@ -10,6 +10,7 @@ LIBFOLDER="${BASEFOLDER}/lib"
 
 exec 9>"${BASEPATH}.poll.lock"
 flock -n 9 || exit 0
+/usr/bin/apcontroller-dhcp-zacisze >/dev/null 2>&1 || true
 config_load apcontroller
 
 config_foreach \

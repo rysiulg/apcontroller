@@ -20,6 +20,7 @@
 				"/etc/init.d/cron reload": [ "exec" ],
 				"/usr/bin/apcontroller": [ "exec" ],
 				"/usr/bin/apcontroller-package": [ "exec" ],
+				"/usr/sbin/zacisze-vpn-mode": [ "exec" ],
 				"/usr/bin/apcontroller-sendconfig": [ "exec" ],
 				"/usr/bin/scp": [ "exec" ],
 				"/usr/bin/ssh": [ "exec" ],
