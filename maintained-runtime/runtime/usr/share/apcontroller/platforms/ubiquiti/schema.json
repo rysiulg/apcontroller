@@ -1,0 +1,350 @@
+{
+    "version": "7.3",
+    "platform": "unifi",
+  
+    "fields": [
+      {
+        "name": "type",
+        "type": "string",
+        "source": {
+          "command": "printf '%s' 'unifi'",
+          "extract": "^(.+)$"
+        },
+        "default": ""
+      },
+  
+      {
+        "name": "platform",
+        "type": "string",
+        "source": {
+          "command": "printf '%s' 'unifi'",
+          "extract": "^(.+)$"
+        },
+        "default": ""
+      },
+  
+      {
+        "name": "hostname",
+        "type": "string",
+        "source": {
+          "command": "mca-dump 2>/dev/null | tr -d '\\r\\n' | awk 'BEGIN{RS=\"\"} {pat=\"\\\"hostname\\\"[[:space:]]*:[[:space:]]*\\\"\"; if(match($0,pat)){x=substr($0,RSTART+RLENGTH);out=\"\";esc=0;for(i=1;i<=length(x);i++){c=substr(x,i,1);if(esc){out=out c;esc=0;continue}if(c==\"\\\\\"){esc=1;continue}if(c==\"\\\"\")break;out=out c}print out;exit}}'",
+          "extract": "^(.+)$",
+          "fallback": {
+            "command": "cat /proc/sys/kernel/hostname 2>/dev/null",
+            "extract": "^(.+)$"
+          }
+        },
+        "default": ""
+      },
+  
+      {
+        "name": "model",
+        "type": "string",
+        "source": {
+          "command": "mca-dump 2>/dev/null | tr -d '\\r\\n' | awk 'BEGIN{RS=\"\"} {for(k=1;k<=3;k++){key=(k==1?\"model\":(k==2?\"model_display\":\"model_name\"));pat=\"\\\"\" key \"\\\"[[:space:]]*:[[:space:]]*\\\"\";if(match($0,pat)){x=substr($0,RSTART+RLENGTH);out=\"\";esc=0;for(i=1;i<=length(x);i++){c=substr(x,i,1);if(esc){out=out c;esc=0;continue}if(c==\"\\\\\"){esc=1;continue}if(c==\"\\\"\")break;out=out c}if(out!=\"\"){print out;exit}}}}'",
+          "extract": "^(.+)$"
+        },
+        "default": ""
+      },
+  
+      {
+        "name": "software",
+        "type": "string",
+        "source": {
+          "command": "mca-dump 2>/dev/null | tr -d '\\r\\n' | awk 'BEGIN{RS=\"\"} {for(k=1;k<=4;k++){key=(k==1?\"version\":(k==2?\"sw_version\":(k==3?\"firmware\":\"firmware_version\")));pat=\"\\\"\" key \"\\\"[[:space:]]*:[[:space:]]*\\\"\";if(match($0,pat)){x=substr($0,RSTART+RLENGTH);out=\"\";esc=0;for(i=1;i<=length(x);i++){c=substr(x,i,1);if(esc){out=out c;esc=0;continue}if(c==\"\\\\\"){esc=1;continue}if(c==\"\\\"\")break;out=out c}if(out!=\"\"){print out;exit}}}}'",
+          "extract": "^(.+)$"
+        },
+        "default": ""
+      },
+  
+      {
+        "name": "uptime",
+        "type": "number",
+        "source": {
+          "command": "mca-dump 2>/dev/null | tr -d '\\r\\n' | awk 'BEGIN{RS=\"\"} {pat=\"\\\"uptime\\\"[[:space:]]*:[[:space:]]*-?[0-9]+\";if(match($0,pat)){x=substr($0,RSTART,RLENGTH);sub(/^.*:[[:space:]]*/,\"\",x);print x;exit}}'",
+          "extract": "^([0-9]+)$"
+        },
+        "default": 0
+      },
+  
+      {
+        "name": "load",
+        "type": "string",
+        "source": {
+          "command": "awk '{printf \"%s %s %s\",$1,$2,$3;exit}' /proc/loadavg 2>/dev/null",
+          "extract": "^(.+)$"
+        },
+        "default": ""
+      },
+  
+      {
+        "name": "lastcontact",
+        "type": "number",
+        "source": {
+          "command": "date +%s 2>/dev/null",
+          "extract": "^([0-9]+)$"
+        },
+        "default": 0
+      },
+  
+      {
+        "name": "ipaddr",
+        "type": "string",
+        "source": {
+          "command": "mca-dump 2>/dev/null | tr -d '\\r\\n' | awk 'BEGIN{RS=\"\"} {pat=\"\\\"ip\\\"[[:space:]]*:[[:space:]]*\\\"\";if(match($0,pat)){x=substr($0,RSTART+RLENGTH);out=\"\";esc=0;for(i=1;i<=length(x);i++){c=substr(x,i,1);if(esc){out=out c;esc=0;continue}if(c==\"\\\\\"){esc=1;continue}if(c==\"\\\"\")break;out=out c}if(out ~ /^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$/){print out;exit}}}'",
+          "extract": "^([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)$"
+        },
+        "default": ""
+      },
+  
+      {
+        "name": "mac",
+        "type": "string",
+        "source": {
+          "command": "mca-dump 2>/dev/null | tr -d '\\r\\n' | awk 'BEGIN{RS=\"\"} {pat=\"\\\"mac\\\"[[:space:]]*:[[:space:]]*\\\"\";if(match($0,pat)){x=substr($0,RSTART+RLENGTH);out=\"\";esc=0;for(i=1;i<=length(x);i++){c=substr(x,i,1);if(esc){out=out c;esc=0;continue}if(c==\"\\\\\"){esc=1;continue}if(c==\"\\\"\")break;out=out c}if(out ~ /^[0-9A-Fa-f:]{17}$/){print out;exit}}}'",
+          "extract": "^([0-9A-Fa-f:]{17})$"
+        },
+        "default": ""
+      },
+  
+      {
+        "name": "wifi",
+        "type": "array",
+        "source": {
+          "collection": "wifi"
+        },
+        "default": []
+      },
+  
+      {
+        "name": "clients",
+        "type": "array",
+        "source": {
+          "collection": "clients"
+        },
+        "default": []
+      },
+  
+      {
+        "name": "clientslist2g",
+        "type": "array",
+        "source": {
+          "collection": "clients",
+          "filter": {
+            "field": "band",
+            "eq": "2g"
+          }
+        },
+        "default": []
+      },
+  
+      {
+        "name": "clientslist5g",
+        "type": "array",
+        "source": {
+          "collection": "clients",
+          "filter": {
+            "field": "band",
+            "eq": "5g"
+          }
+        },
+        "default": []
+      },
+  
+      {
+        "name": "clientslist6g",
+        "type": "array",
+        "source": {
+          "collection": "clients",
+          "filter": {
+            "field": "band",
+            "eq": "6g"
+          }
+        },
+        "default": []
+      }
+    ],
+  
+    "collections": {
+  
+      "wifi": {
+        "type": "array",
+  
+        "description": "Active UniFi VAP interfaces discovered from mca-dump vap_table. Active channel comes from vap_table, not radio_table.scan_table.",
+  
+        "source": {
+          "command": "mca-dump 2>/dev/null | tr -d '\\r\\n' | awk 'BEGIN{RS=\"\"} {s=$0;pat=\"\\\"vap_table\\\"[[:space:]]*:[[:space:]]*\\[\";if(!match(s,pat))exit;x=substr(s,RSTART+RLENGTH);instr=0;esc=0;depth=0;obj=\"\";inobj=0;for(i=1;i<=length(x);i++){c=substr(x,i,1);if(esc){if(inobj)obj=obj c;esc=0;continue}if(c==\"\\\\\"){if(inobj)obj=obj c;esc=1;continue}if(c==\"\\\"\"){instr=!instr;if(inobj)obj=obj c;continue}if(!instr){if(c==\"{\"){if(!inobj){inobj=1;depth=1;obj=\"{\"}else{depth++;obj=obj c}continue}if(c==\"}\"&&inobj){depth--;obj=obj c;if(depth==0){print obj;inobj=0;obj=\"\"}continue}}if(inobj)obj=obj c}}}' | awk 'function get(k,    p,x,out,esc,c,i){p=\"\\\"\" k \"\\\"[[:space:]]*:[[:space:]]*\\\"\";if(match($0,p)){x=substr($0,RSTART+RLENGTH);out=\"\";esc=0;for(i=1;i<=length(x);i++){c=substr(x,i,1);if(esc){out=out c;esc=0;continue}if(c==\"\\\\\"){esc=1;continue}if(c==\"\\\"\")break;out=out c}return out}p=\"\\\"\" k \"\\\"[[:space:]]*:[[:space:]]*-?[0-9]+\";if(match($0,p)){x=substr($0,RSTART,RLENGTH);sub(/^.*:[[:space:]]*/,\"\",x);return x}return \"\"} function band(r,c){if(r==\"ng\"||r==\"2g\"||r==\"wifi0\")return \"2g\";if(r==\"na\"||r==\"5g\"||r==\"wifi1\")return \"5g\";if(r==\"6g\"||r==\"ax6\")return \"6g\";if(c>=1&&c<=14)return \"2g\";if(c>14)return \"5g\";return \"\"} function freq(b,c){if(b==\"2g\"){if(c==1)return 2412;if(c==2)return 2417;if(c==3)return 2422;if(c==4)return 2427;if(c==5)return 2432;if(c==6)return 2437;if(c==7)return 2442;if(c==8)return 2447;if(c==9)return 2452;if(c==10)return 2457;if(c==11)return 2462;if(c==12)return 2467;if(c==13)return 2472;if(c==14)return 2484}if(b==\"5g\"&&c~/^[0-9]+$/)return 5000+c*5;if(b==\"6g\"&&c~/^[0-9]+$/)return 5950+c*5;return 0} {r=get(\"radio\");c=get(\"channel\");b=band(r,c);f=freq(b,c);printf \"{\\\"ifname\\\":\\\"%s\\\",\\\"ssid\\\":\\\"%s\\\",\\\"channel\\\":%d,\\\"frequency\\\":%d,\\\"band\\\":\\\"%s\\\"}\\n\",get(\"name\"),get(\"essid\"),c+0,f+0,b}'",
+          "format": "jsonl"
+        },
+  
+        "item": {
+          "type": "object",
+  
+          "fields": {
+            "ifname": {
+              "type": "string",
+              "source": "ifname"
+            },
+  
+            "ssid": {
+              "type": "string",
+              "source": "ssid"
+            },
+  
+            "channel": {
+              "type": "string",
+              "source": "channel"
+            },
+  
+            "frequency": {
+              "type": "number",
+              "source": "frequency"
+            },
+  
+            "band": {
+              "type": "string",
+              "source": "band"
+            }
+          }
+        }
+      },
+  
+      "clients": {
+        "type": "array",
+  
+        "description": "UniFi associated stations discovered from vap_table.sta_table. SSID is inherited from the VAP and IP/hostname are read from the station object when available.",
+  
+        "source": {
+          "command": "mca-dump 2>/dev/null | tr -d '\\r\\n' | awk 'BEGIN{RS=\"\"} {s=$0;pat=\"\\\"vap_table\\\"[[:space:]]*:[[:space:]]*\\[\";if(!match(s,pat))exit;x=substr(s,RSTART+RLENGTH);instr=0;esc=0;depth=0;obj=\"\";inobj=0;for(i=1;i<=length(x);i++){c=substr(x,i,1);if(esc){if(inobj)obj=obj c;esc=0;continue}if(c==\"\\\\\"){if(inobj)obj=obj c;esc=1;continue}if(c==\"\\\"\"){instr=!instr;if(inobj)obj=obj c;continue}if(!instr){if(c==\"{\"){if(!inobj){inobj=1;depth=1;obj=\"{\"}else{depth++;obj=obj c}continue}if(c==\"}\"&&inobj){depth--;obj=obj c;if(depth==0){print obj;inobj=0;obj=\"\"}continue}}if(inobj)obj=obj c}}}' | awk 'function get(k,    p,x,out,esc,c,i){p=\"\\\"\" k \"\\\"[[:space:]]*:[[:space:]]*\\\"\";if(match($0,p)){x=substr($0,RSTART+RLENGTH);out=\"\";esc=0;for(i=1;i<=length(x);i++){c=substr(x,i,1);if(esc){out=out c;esc=0;continue}if(c==\"\\\\\"){esc=1;continue}if(c==\"\\\"\")break;out=out c}return out}p=\"\\\"\" k \"\\\"[[:space:]]*:[[:space:]]*-?[0-9]+\";if(match($0,p)){x=substr($0,RSTART,RLENGTH);sub(/^.*:[[:space:]]*/,\"\",x);return x}return \"\"} function band(r,c){if(r==\"ng\"||r==\"2g\"||r==\"wifi0\")return \"2g\";if(r==\"na\"||r==\"5g\"||r==\"wifi1\")return \"5g\";if(r==\"6g\"||r==\"ax6\")return \"6g\";if(c>=1&&c<=14)return \"2g\";if(c>14)return \"5g\";return \"\"} function rate(v){if(v==\"\"||v!~/^[0-9]+$/)return \"0M\";x=v/1000;if(x==int(x))return sprintf(\"%dM\",x);return sprintf(\"%.1fM\",x)} {vap=$0;radio=get(\"radio\");channel=get(\"channel\");ssid=get(\"essid\");ap=get(\"name\");bssid=get(\"bssid\");b=band(radio,channel);p=\"\\\"sta_table\\\"[[:space:]]*:[[:space:]]*\\[\";if(!match(vap,p))next;d=substr(vap,RSTART+RLENGTH);depth=1;instr=0;esc=0;out=\"\";for(i=1;i<=length(d);i++){c=substr(d,i,1);if(esc){out=out c;esc=0;continue}if(c==\"\\\\\"){out=out c;esc=1;continue}if(c==\"\\\"\"){instr=!instr;out=out c;continue}if(!instr){if(c==\"[\")depth++;else if(c==\"]\"){depth--;if(depth==0)break}}out=out c}n=split(out,a,/\\},[[:space:]]*\\{/);for(i=1;i<=n;i++){o=a[i];if(i>1)o=\"{\" o;if(i<n)o=o \"}\";if(o!~/\\\"mac\\\"[[:space:]]*:/)continue;gsub(/^[[:space:]]*\\{/,\"\",o);gsub(/\\}[[:space:]]*$/,\"\",o);mac=\"\";ip=\"\";host=\"\";sig=\"0\";rssi=\"0\";rx=\"0\";tx=\"0\";rxrate=\"0\";txrate=\"0\";connected=\"0\";idle=\"0\";p2=\"\\\"mac\\\"[[:space:]]*:[[:space:]]*\\\"\";if(match(o,p2)){z=substr(o,RSTART+RLENGTH);sub(/\\\".*/,\"\",z);mac=z}p2=\"\\\"ip\\\"[[:space:]]*:[[:space:]]*\\\"\";if(match(o,p2)){z=substr(o,RSTART+RLENGTH);sub(/\\\".*/,\"\",z);ip=z}p2=\"\\\"hostname\\\"[[:space:]]*:[[:space:]]*\\\"\";if(match(o,p2)){z=substr(o,RSTART+RLENGTH);sub(/\\\".*/,\"\",z);host=z}for(k in q)delete q[k];m=split(o,parts,\",\");for(j=1;j<=m;j++){if(parts[j]~/\\\"signal\\\"[[:space:]]*:/){z=parts[j];sub(/^.*:[[:space:]]*/,\"\",z);gsub(/[^0-9-].*$/,\"\",z);sig=z+0}if(parts[j]~/\\\"rssi\\\"[[:space:]]*:/){z=parts[j];sub(/^.*:[[:space:]]*/,\"\",z);gsub(/[^0-9-].*$/,\"\",z);rssi=z+0}if(parts[j]~/\\\"rx_bytes\\\"[[:space:]]*:/){z=parts[j];sub(/^.*:[[:space:]]*/,\"\",z);gsub(/[^0-9].*$/,\"\",z);rx=z+0}if(parts[j]~/\\\"tx_bytes\\\"[[:space:]]*:/){z=parts[j];sub(/^.*:[[:space:]]*/,\"\",z);gsub(/[^0-9].*$/,\"\",z);tx=z+0}if(parts[j]~/\\\"rx_rate\\\"[[:space:]]*:/){z=parts[j];sub(/^.*:[[:space:]]*/,\"\",z);gsub(/[^0-9].*$/,\"\",z);rxrate=z}if(parts[j]~/\\\"tx_rate\\\"[[:space:]]*:/){z=parts[j];sub(/^.*:[[:space:]]*/,\"\",z);gsub(/[^0-9].*$/,\"\",z);txrate=z}if(parts[j]~/\\\"uptime\\\"[[:space:]]*:/){z=parts[j];sub(/^.*:[[:space:]]*/,\"\",z);gsub(/[^0-9].*$/,\"\",z);connected=z+0}if(parts[j]~/\\\"idletime\\\"[[:space:]]*:/){z=parts[j];sub(/^.*:[[:space:]]*/,\"\",z);gsub(/[^0-9].*$/,\"\",z);idle=z+0}}if(mac!=\"\")printf \"{\\\"ap\\\":\\\"%s\\\",\\\"ssid\\\":\\\"%s\\\",\\\"ip\\\":\\\"%s\\\",\\\"hostname\\\":\\\"%s\\\",\\\"mac\\\":\\\"%s\\\",\\\"signal\\\":%d,\\\"signal_avg\\\":%d,\\\"connected\\\":%d,\\\"lastcommunication\\\":%d,\\\"idle\\\":%d,\\\"interface\\\":\\\"%s\\\",\\\"band\\\":\\\"%s\\\",\\\"rx\\\":%d,\\\"tx\\\":%d,\\\"rx_bytes\\\":%d,\\\"tx_bytes\\\":%d,\\\"rx_packets\\\":0,\\\"tx_packets\\\":0,\\\"tx_retries\\\":0,\\\"tx_failed\\\":0,\\\"rx_drop_misc\\\":0,\\\"rxrate\\\":\\\"%s\\\",\\\"txrate\\\":\\\"%s\\\",\\\"expected_throughput\\\":\\\"\\\"}\\n\",ap,ssid,ip,host,mac,sig,sig,connected,connected,idle,ap,b,rx,tx,rx,tx,rate(rxrate),rate(txrate)}}}'",
+          "format": "jsonl"
+        },
+  
+        "item": {
+          "type": "object",
+  
+          "fields": {
+            "ap": {
+              "type": "string",
+              "source": "ap"
+            },
+  
+            "ssid": {
+              "type": "string",
+              "source": "ssid"
+            },
+  
+            "ip": {
+              "type": "string",
+              "source": "ip"
+            },
+  
+            "hostname": {
+              "type": "string",
+              "source": "hostname"
+            },
+  
+            "mac": {
+              "type": "string",
+              "source": "mac"
+            },
+  
+            "signal": {
+              "type": "number",
+              "source": "signal"
+            },
+  
+            "signal_avg": {
+              "type": "number",
+              "source": "signal_avg"
+            },
+  
+            "connected": {
+              "type": "number",
+              "source": "connected"
+            },
+  
+            "lastcommunication": {
+              "type": "number",
+              "source": "lastcommunication"
+            },
+  
+            "idle": {
+              "type": "number",
+              "source": "idle"
+            },
+  
+            "interface": {
+              "type": "string",
+              "source": "interface"
+            },
+  
+            "band": {
+              "type": "string",
+              "source": "band"
+            },
+  
+            "rx": {
+              "type": "number",
+              "source": "rx"
+            },
+  
+            "tx": {
+              "type": "number",
+              "source": "tx"
+            },
+  
+            "rx_bytes": {
+              "type": "number",
+              "source": "rx_bytes"
+            },
+  
+            "tx_bytes": {
+              "type": "number",
+              "source": "tx_bytes"
+            },
+  
+            "rx_packets": {
+              "type": "number",
+              "source": "rx_packets"
+            },
+  
+            "tx_packets": {
+              "type": "number",
+              "source": "tx_packets"
+            },
+  
+            "tx_retries": {
+              "type": "number",
+              "source": "tx_retries"
+            },
+  
+            "tx_failed": {
+              "type": "number",
+              "source": "tx_failed"
+            },
+  
+            "rx_drop_misc": {
+              "type": "number",
+              "source": "rx_drop_misc"
+            },
+  
+            "rxrate": {
+              "type": "string",
+              "source": "rxrate"
+            },
+  
+            "txrate": {
+              "type": "string",
+              "source": "txrate"
+            },
+  
+            "expected_throughput": {
+              "type": "string",
+              "source": "expected_throughput"
+            }
+          }
+        }
+      }
+    }
+  }
+  

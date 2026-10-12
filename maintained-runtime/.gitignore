@@ -1,0 +1,4 @@
+.signing/
+*.private.pem
+build/
+*.apk-new

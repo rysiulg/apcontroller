@@ -75,3 +75,7 @@ Komentarz `#desc:` oznacza nazwę skryptu wyświetlaną na liście dostępnych s
 W pliku `/root/.ssh/known_hosts` przechowywane są odciski kluczy publicznych (tzw. fingerprinty) usługi SSH z AP, z którymi wcześniej nawiązano połączenie. Mechanizm ten służy do weryfikacji tożsamości hosta i ochrony przed atakami typu man-in-the-middle.
 
 W przypadku zmiany klucza AP (np. po reinstalacji systemu lub przywróceniu ustawień fabrycznych) jego odcisk również ulegnie zmianie. W takiej sytuacji klient SSH zgłosi ostrzeżenie o niezgodności klucza. Aby przywrócić możliwość połączenia, należy ręcznie usunąć lub zaktualizować odpowiedni wpis w pliku `/root/.ssh/known_hosts`, a następnie ponownie zaakceptować nowy klucz hosta podczas łączenia.
+
+## Utrzymywane wydanie runtime
+
+Audytowane wydanie **20261012-r1** jest w [maintained-runtime/](maintained-runtime/README.md): spójne nazwy i IP klientów, aliasy w LuCI, blokada równoległego odpytywania, poprawne czasy kontaktu oraz kontrola kluczy SSH. Katalog zawiera źródła, skrypty pakowania i opis instalacji podpisanego feedu. Dotychczasowy przepis SDK i feed pozostają zachowane. Obsługa Omada/MikroTik i push/HTTP jest niepełna — opis ograniczeń znajduje się w dokumentacji wydania.
