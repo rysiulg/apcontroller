@@ -27,11 +27,15 @@ apc_ssh_options()
 	local usekeyfile="$3"
 
 	[ -n "$port" ] || port=22
+	mkdir -p /etc/apcontroller; chmod 700 /etc/apcontroller
+	touch /etc/apcontroller/known_hosts; chmod 600 /etc/apcontroller/known_hosts
 
 	printf '%s\n' \
 		"-o" "ConnectTimeout=5" \
-		"-o" "StrictHostKeyChecking=no" \
-		"-o" "UserKnownHostsFile=/dev/null" \
+		"-o" "ServerAliveInterval=5" \
+		"-o" "ServerAliveCountMax=2" \
+		"-o" "StrictHostKeyChecking=accept-new" \
+		"-o" "UserKnownHostsFile=/etc/apcontroller/known_hosts" \
 		"-p" "$port"
 
 	if [ "$usekeyfile" = "1" ] && [ -n "$keyfile" ]; then

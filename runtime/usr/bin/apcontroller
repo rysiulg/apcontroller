@@ -8,6 +8,8 @@ LIBFOLDER="${BASEFOLDER}/lib"
 . "${LIBFOLDER}/rpc.sh"
 . /lib/functions.sh
 
+exec 9>"${BASEPATH}.poll.lock"
+flock -n 9 || exit 0
 config_load apcontroller
 
 config_foreach \

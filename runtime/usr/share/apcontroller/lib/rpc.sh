@@ -207,6 +207,7 @@ apc_validate_host_response()
 		jsonfilter -q -e '@.mac' \
 		>/dev/null 2>&1 ||
 		return 1
+	[ -n "$(printf '%s' "$data" | jsonfilter -q -e '@.mac' 2>/dev/null)" ] || return 1
 
 	return 0
 }
@@ -230,7 +231,7 @@ apc_host_set_online()
 			;;
 	esac
 
-	printf '%s\n' "$value=0 && '0' || '1'" > "${BASEPATH}/${ipaddr}.online"
+	printf '%s\n' "$value" > "${BASEPATH}/${ipaddr}.online"
 }
 
 
@@ -282,6 +283,7 @@ get_data_from_host()
     local onlinefile
 
 	local ret
+	local success=0
 
 
 	###########################################################################
@@ -381,6 +383,7 @@ get_data_from_host()
 			"no platform available host=$ipaddr"
 
 		empty_host_json > "$output"
+		apc_host_set_online "$ipaddr" 0
 
 		return 0
 	fi
@@ -424,6 +427,7 @@ get_data_from_host()
 		[ -s "$tmpoutput" ] &&
 		apc_validate_host_response "$tmpoutput"
 	then
+		success=1
 		date +%s > "${onlinefile}.tmp"
 		mv "${onlinefile}.tmp" "$onlinefile"
 
@@ -505,9 +509,7 @@ get_data_from_host()
 
 	now="$(date +%s)"
 
-	if [ "$ret" -eq 0 ] &&
-		[ -s "$output" ] &&
-		apc_validate_host_response "$output"
+	if [ "$success" -eq 1 ]
 	then
 
 		#
@@ -674,6 +676,7 @@ build_one_host()
 	local now
 	local ts
 	local lastcontact
+	local interval
 
 	local mac
 	local hostname
@@ -771,8 +774,9 @@ build_one_host()
 		esac
 
 	fi
-
-
+	interval="$(uci -q get apcontroller.@global[0].interval)"
+	case "$interval" in ''|*[!0-9]*|0) interval=5;; esac
+	[ "$lastcontact" -ge 0 ] && [ "$lastcontact" -le "$((interval * 150))" ] || online=0
 
 	mac="$(
 		printf '%s' "$data" |
@@ -995,11 +999,9 @@ rpc_status()
 
 	config_load apcontroller
 
-	printf '{"hosts":'
-
-	build_hosts
-
-	printf '}\n'
+	local response
+	response="$(printf '{"hosts":'; build_hosts; printf '}\n')"
+	printf '%s\n' "$response" | ucode "$BASEFOLDER/lib/client-names.uc" || printf '%s\n' "$response"
 }
 
 

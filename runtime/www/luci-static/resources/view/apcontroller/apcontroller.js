@@ -70,6 +70,7 @@ function hostStatus(records, section_id) {
 		return E('span', '-');
 
 	const timestamp = new Date().getTime() / 1000;
+	if (obj && obj.online === 0) return E('span', { 'style': 'color: red' }, '● ' + _('Offline'));
 	const interval = uci.get('apcontroller', '@global[0]', 'interval');
 
 	if (!interval)
@@ -185,7 +186,7 @@ return view.extend({
 	},
 
 	render: function(data) {
-		const hosts = data[0];
+		let hosts = data[0] || {};
 
 		let devicestatus = {};
 		let clients = [];
@@ -254,7 +255,7 @@ return view.extend({
 					row['channels6g'] =
 						row['channels6g'].replaceAll(' ', ', ');
 
-				row['.lastcontact'] = row['.lastcontact'];
+				row['.lastcontact'] = row['.lastcontact'] ?? row['lastcontact'] ?? -1;
 
 				if (row['.lastcontact'] > -1) {
 					const d = new Date(
@@ -319,7 +320,7 @@ return view.extend({
 					row['uptime'] = '-';
 				}
 
-				if (row['clientslist2g']) {
+				if (row.online === 1 && row['clientslist2g']) {
 					row['clients2g'] =
 						String(row['clientslist2g'].length);
 
@@ -332,7 +333,7 @@ return view.extend({
 					clients = clients.concat(t);
 				}
 
-				if (row['clientslist5g']) {
+				if (row.online === 1 && row['clientslist5g']) {
 					row['clients5g'] =
 						String(row['clientslist5g'].length);
 
@@ -345,7 +346,7 @@ return view.extend({
 					clients = clients.concat(t);
 				}
 
-				if (row['clientslist6g']) {
+				if (row.online === 1 && row['clientslist6g']) {
 					row['clients6g'] =
 						String(row['clientslist6g'].length);
 
@@ -366,13 +367,13 @@ return view.extend({
 				const mac = c.mac.toUpperCase();
 				c.mac = mac;
 
-				if (c.name == '' || c.name == '*') {
+				if (!c.name || c.name == '*') {
 					if (hosts[mac] && hosts[mac].name)
 						c.name =
 							hosts[mac].name.replace('.lan', '');
 				}
 
-				if (c.ipaddr == '') {
+				if (!c.ipaddr || c.ipaddr == '*') {
 					if (hosts[mac] && hosts[mac].ipaddrs)
 						c.ipaddr =
 							hosts[mac].ipaddrs.join('<br>');
@@ -2801,6 +2802,13 @@ return view.extend({
 			return names.join(', ');
 		};
 
+		s = m.section(form.GridSection, 'client', _('Client names'));
+		s.anonymous = true; s.addremove = true;
+		o = s.option(form.Value, 'mac', _('MAC Address'));
+		o.datatype = 'macaddr'; o.rmempty = false;
+		o = s.option(form.Value, 'name', _('Name'));
+		o.rmempty = false;
+
 		/*
 		 * GLOBAL SETTINGS
 		 */
@@ -2849,7 +2857,7 @@ return view.extend({
 		);
 
 		o.datatype =
-			'and(uinteger,min(1),max(9999))';
+			'and(uinteger,min(1),max(59))';
 
 		o = s.option(
 			form.MultiValue,
@@ -2991,8 +2999,10 @@ return view.extend({
 
 		poll.add(
 			() => {
-				return callAPController()
-					.then(livestatus => {
+				return Promise.all([callHostHints(), callAPController()])
+					.then(results => {
+						hosts = results[0] || {};
+						const livestatus = results[1];
 						updateDeviceStatus(
 							livestatus
 						);
