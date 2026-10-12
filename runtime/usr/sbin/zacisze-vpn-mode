@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+mode=${1:-status}
+case "$mode" in
+ status) uci -q get apcontroller.zacisze.mode;;
+ marm-only|both) uci set "apcontroller.zacisze.mode=$mode"; uci commit apcontroller; exec /usr/bin/apcontroller-vpn apply zacisze;;
+ *) echo 'Użycie: zacisze-vpn-mode [status|marm-only|both]' >&2; exit 2;;
+esac

@@ -16,6 +16,8 @@ if [ ! -s "$KEY" ]; then openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curv
 chmod 600 "$KEY"
 openssl pkey -in "$KEY" -pubout -out "$OUT/keys/apcontroller-local.pem"
 cp -a "$SOURCE/runtime/usr" "$STAGE/apcontroller/"
+mkdir -p "$STAGE/apcontroller/etc/init.d"
+cp "$SOURCE/runtime/etc/init.d/apcontroller-vpn" "$STAGE/apcontroller/etc/init.d/"
 rm -rf "$STAGE/apcontroller/usr/lib/lua" "$STAGE/apcontroller/usr/share/luci" "$STAGE/apcontroller/usr/share/rpcd"
 mkdir -p "$STAGE/apcontroller/etc/config" "$STAGE/apcontroller/etc/apk/protected_paths.d" "$STAGE/apcontroller/lib/apk/packages"
 cp "$SOURCE/packaging/default.config" "$STAGE/apcontroller/etc/config/apcontroller"
@@ -30,7 +32,8 @@ cp "$SOURCE/runtime/usr/lib/lua/luci/i18n/apcontroller.pl.lmo" "$STAGE/luci-i18n
 find "$STAGE" -type d -exec chmod 755 '{}' ';'
 find "$STAGE" -type f -exec chmod 644 '{}' ';'
 chmod 755 "$STAGE/apcontroller/usr/bin/"* "$STAGE/apcontroller/usr/libexec/rpcd/apcontroller" "$STAGE/apcontroller/usr/share/apcontroller/poller" "$STAGE/apcontroller/usr/share/apcontroller/receiver"
-"$APK" mkpkg --sign-key "$KEY" -I "name:apcontroller" -I "version:$VERSION" -I "arch:$ARCH" -I 'license:MIT' -I 'origin:apcontroller' -I 'description:AP controller with central client names and serialized polling' -I 'depends:libc busybox sshpass openssh-client ucode ucode-mod-fs ucode-mod-ubus ucode-mod-uci ucode-mod-socket sexpect jsonfilter uci rpcd-mod-luci' -F "$STAGE/apcontroller" -s "post-install:$SOURCE/packaging/postinst.sh" -s "post-upgrade:$SOURCE/packaging/postinst.sh" -o "$OUT/$ARCH/apcontroller-$VERSION.apk"
+chmod 755 "$STAGE/apcontroller/etc/init.d/apcontroller-vpn" "$STAGE/apcontroller/usr/sbin/zacisze-vpn-mode"
+"$APK" mkpkg --sign-key "$KEY" -I "name:apcontroller" -I "version:$VERSION" -I "arch:$ARCH" -I 'license:MIT' -I 'origin:apcontroller' -I 'description:AP controller with client totals, subnet colors and named VPN profiles' -I 'depends:libc busybox sshpass openssh-client ucode ucode-mod-fs ucode-mod-ubus ucode-mod-uci ucode-mod-socket sexpect coreutils-timeout jsonfilter uci rpcd-mod-luci' -F "$STAGE/apcontroller" -s "post-install:$SOURCE/packaging/postinst.sh" -s "post-upgrade:$SOURCE/packaging/postinst.sh" -o "$OUT/$ARCH/apcontroller-$VERSION.apk"
 "$APK" mkpkg --sign-key "$KEY" -I "name:luci-app-apcontroller" -I "version:$VERSION" -I "arch:$ARCH" -I 'license:MIT' -I 'origin:apcontroller' -I 'description:LuCI AP controller and client aliases' -I "depends:libc luci-base apcontroller>=$VERSION" -F "$STAGE/luci-app-apcontroller" -o "$OUT/$ARCH/luci-app-apcontroller-$VERSION.apk"
 "$APK" mkpkg --sign-key "$KEY" -I "name:luci-i18n-apcontroller-pl" -I "version:$VERSION" -I "arch:$ARCH" -I 'license:MIT' -I 'origin:apcontroller' -I 'description:Polish translation of AP controller' -I "depends:libc luci-app-apcontroller>=$VERSION" -F "$STAGE/luci-i18n-apcontroller-pl" -o "$OUT/$ARCH/luci-i18n-apcontroller-pl-$VERSION.apk"
 printf '%s\n' "$VERSION" > "$STAGE/luci-apcontroller/usr/share/apcontroller/package-alias"

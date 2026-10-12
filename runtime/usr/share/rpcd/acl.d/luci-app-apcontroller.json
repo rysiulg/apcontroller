@@ -3,34 +3,77 @@
 		"description": "Grant UCI access for luci-app-apcontroller",
 		"read": {
 			"file": {
-				"/etc/crontabs/root": [ "read" ],
-				"/etc/apcontroller/discovery.json": [ "read" ],
-				"/usr/share/apcontroller/apcontroller.user": [ "read" ]
+				"/etc/crontabs/root": [
+					"read"
+				],
+				"/etc/apcontroller/discovery.json": [
+					"read"
+				],
+				"/usr/share/apcontroller/apcontroller.user": [
+					"read"
+				]
 			},
 			"ubus": {
-				"apcontroller": [ "activity", "scripts", "status" ],
-				"file": [ "read" ],
-				"luci-rpc": [ "getHostHints" ]
+				"apcontroller": [
+					"activity",
+					"scripts",
+					"status"
+				],
+				"file": [
+					"read"
+				],
+				"luci-rpc": [
+					"getHostHints"
+				]
 			},
-			"uci": [ "apcontroller" ]
+			"uci": [
+				"apcontroller"
+			]
 		},
 		"write": {
 			"file": {
-				"/etc/crontabs/root": [ "write" ],
-				"/etc/init.d/cron reload": [ "exec" ],
-				"/usr/bin/apcontroller": [ "exec" ],
-				"/usr/bin/apcontroller-package": [ "exec" ],
-				"/usr/sbin/zacisze-vpn-mode": [ "exec" ],
-				"/usr/bin/apcontroller-sendconfig": [ "exec" ],
-				"/usr/bin/scp": [ "exec" ],
-				"/usr/bin/ssh": [ "exec" ],
-				"/usr/bin/sshpass": [ "exec" ],
-				"/usr/share/apcontroller/apcontroller.user": [ "write" ]
+				"/etc/crontabs/root": [
+					"write"
+				],
+				"/etc/init.d/cron reload": [
+					"exec"
+				],
+				"/usr/bin/apcontroller": [
+					"exec"
+				],
+				"/usr/bin/apcontroller-package": [
+					"exec"
+				],
+				"/usr/sbin/zacisze-vpn-mode": [
+					"exec"
+				],
+				"/usr/bin/apcontroller-sendconfig": [
+					"exec"
+				],
+				"/usr/bin/scp": [
+					"exec"
+				],
+				"/usr/bin/ssh": [
+					"exec"
+				],
+				"/usr/bin/sshpass": [
+					"exec"
+				],
+				"/usr/share/apcontroller/apcontroller.user": [
+					"write"
+				],
+				"/usr/bin/apcontroller-vpn": [
+					"exec"
+				]
 			},
 			"ubus": {
-				"file": [ "write" ]
+				"file": [
+					"write"
+				]
 			},
-			"uci": [ "apcontroller" ]
+			"uci": [
+				"apcontroller"
+			]
 		}
 	}
 }

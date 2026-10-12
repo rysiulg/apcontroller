@@ -102,7 +102,7 @@ return view.extend({
 			uci.load('apcontroller'),
 			Promise.resolve(null),
 			Promise.resolve(null),
-			L.resolveDefault(fs.exec('/usr/sbin/zacisze-vpn-mode', ['status']), {stdout:''})
+			L.resolveDefault(fs.exec('/usr/bin/apcontroller-vpn', ['status']), {stdout:'[]'})
 		]);
 	},
 
@@ -138,6 +138,7 @@ return view.extend({
 				);
 			})
 			.then(() => this.super('handleSaveApply', [ev, mode]))
+			.then(async () => { const r=await fs.exec('/usr/bin/apcontroller-vpn',['apply']); if(r.code)throw new Error(r.stderr||r.stdout||'Błąd konfiguracji VPN'); })
 			.then(() => {
 				const container =
 					document.querySelector('.cbi-value[data-name="interval"]');
@@ -235,6 +236,26 @@ return view.extend({
 			'wifi_tx_dropped': _('TX dropped'), 'name_source': _('Źródło nazwy')
 		};
 
+		function ipv4(value) {
+			if (!/^\d+\.\d+\.\d+\.\d+$/.test(value||'')) return null;
+			const a=value.split('.').map(Number); return a.every(n=>n>=0&&n<=255)?a.reduce((n,b)=>n*256+b,0):null;
+		}
+		function inSubnet(ip,cidr) {
+			const parts=String(cidr).split('/'), n=ipv4(ip), base=ipv4(parts[0]), bits=parts[1]==null?32:Number(parts[1]);
+			return n!=null&&base!=null&&Number.isInteger(bits)&&bits>=0&&bits<=32&&Math.floor(n/2**(32-bits))===Math.floor(base/2**(32-bits));
+		}
+		function subnetTag(value) {
+			const ips=String(value||'').match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)||[], native=L.toArray(uci.get('apcontroller','@global[0]','native_subnet')||['10.48.18.0/24']);
+			const ip=ips.find(ip=>ipv4(ip)!=null&&!native.some(c=>inSubnet(ip,c))); if(!ip)return null;
+			const profile=uci.sections('apcontroller','vpn').find(p=>inSubnet(ip,p.remote_subnet));
+			const label=profile?profile.remote_subnet:ip.split('.').slice(0,3).join('.')+'.0/24'; let hash=0; for(const c of label)hash=(hash*31+c.charCodeAt(0))>>>0;
+			return {label:label, color:['#3973b9','#9855a6','#ad6500','#147d78','#a34c66'][hash%5]};
+		}
+		function clientSummary(list) {
+			const count={2:0,5:0,6:0}, macs=new Set();list.forEach(c=>{if(count[c.band]!=null)count[c.band]++;if(c.mac)macs.add(c.mac.toUpperCase());});
+			return E('div',{'class':'apc-client-summary'},[['Klienci',list.length],['2,4 GHz',count[2]],['5 GHz',count[5]],['6 GHz',count[6]],['Unikalne MAC',macs.size]].map(([label,n])=>E('div',{},[E('span',{},label),E('strong',{},String(n))])));
+		}
+
 		function updateDeviceStatus(records) {
 			devicestatus = records || {};
 			clients.length = 0;
@@ -330,7 +351,7 @@ return view.extend({
 					row['uptime'] = '-';
 				}
 
-				if (row.online === 1 && row['clientslist2g']) {
+				if (row.enabled !== false && row.enabled !== 0 && uci.get('apcontroller',row.section,'enabled') !== '0' && row.online === 1 && row['.lastcontact'] <= Number(uci.get('apcontroller','@global[0]','interval')||5)*150 && row['clientslist2g']) {
 					row['clients2g'] =
 						String(row['clientslist2g'].length);
 
@@ -343,7 +364,7 @@ return view.extend({
 					clients = clients.concat(t);
 				}
 
-				if (row.online === 1 && row['clientslist5g']) {
+				if (row.enabled !== false && row.enabled !== 0 && uci.get('apcontroller',row.section,'enabled') !== '0' && row.online === 1 && row['.lastcontact'] <= Number(uci.get('apcontroller','@global[0]','interval')||5)*150 && row['clientslist5g']) {
 					row['clients5g'] =
 						String(row['clientslist5g'].length);
 
@@ -356,7 +377,7 @@ return view.extend({
 					clients = clients.concat(t);
 				}
 
-				if (row.online === 1 && row['clientslist6g']) {
+				if (row.enabled !== false && row.enabled !== 0 && uci.get('apcontroller',row.section,'enabled') !== '0' && row.online === 1 && row['.lastcontact'] <= Number(uci.get('apcontroller','@global[0]','interval')||5)*150 && row['clientslist6g']) {
 					row['clients6g'] =
 						String(row['clientslist6g'].length);
 
@@ -437,7 +458,7 @@ return view.extend({
 
 		function renderClientsTable(clients) {
 			if (!clients || clients.length === 0) {
-				return E(
+				return E('div',{},[clientSummary([]),E(
 					'table',
 					{
 						'class':
@@ -462,7 +483,7 @@ return view.extend({
 							]
 						)
 					]
-				);
+				)]);
 			}
 
 			const selectedclientscolumns =
@@ -497,6 +518,7 @@ return view.extend({
 
 			function formatCell(key, client) {
 				switch (key) {
+				case 'ipaddr': { const tag=subnetTag(client.ipaddr); return E('span',tag?{'class':'apc-subnet',title:'Podsieć: '+tag.label,style:'border-color:'+tag.color+';color:'+tag.color}:{},String(client.ipaddr||'-').replace(/<br\s*\/?\s*>/gi,', ')); }
 				case 'band':
 					if (client.band == 2)
 						return '2.4 GHz';
@@ -559,6 +581,8 @@ return view.extend({
 						'h3',
 						_('Connected Wireless Clients')
 					),
+					clientSummary(clients),
+					E('p',{'class':'apc-subnet-legend'},Array.from(new Map(clients.map(c=>subnetTag(c.ipaddr)).filter(Boolean).map(t=>[t.label,t])).values()).map(t=>E('span',{'class':'apc-subnet',style:'border-color:'+t.color+';color:'+t.color},t.label))),
 					table
 				]
 			);
@@ -1969,6 +1993,7 @@ return view.extend({
 		if (!selectedcolumns.includes('ipaddr'))
 			o.modalonly = true;
 
+		o.textvalue = function(section_id) { const value=uci.get('apcontroller',section_id,'ipaddr')||'-', tag=subnetTag(value); return E('span',tag?{'class':'apc-subnet',title:'Podsieć: '+tag.label,style:'border-color:'+tag.color+';color:'+tag.color}:{},value); };
 		let ipaddrs = {};
 
 		Object.keys(hosts).forEach(mac => {
@@ -2913,12 +2938,23 @@ return view.extend({
 		).forEach(([key, value]) => {
 			o.value(key, value);
 		});
-		o = s.option(form.DummyValue, '_zaciszevpn', _('VPN MARM - Zacisze'));
-		o.renderWidget = function() {
-			const status=E('p', {}, data[6].stdout.trim()==='0'?'Tylko MARM inicjuje dostęp do Zacisza':data[6].stdout.trim()==='1'?'Obie sieci mogą inicjować połączenia':'Tunel nie jest skonfigurowany');
-			const run=async function(mode) {try {const r=await fs.exec('/usr/sbin/zacisze-vpn-mode',[mode]);if(r.code)throw new Error(r.stderr||'Błąd zmiany trybu');status.textContent=mode==='marm-only'?'Tylko MARM inicjuje dostęp do Zacisza':'Obie sieci mogą inicjować połączenia';}catch(e){ui.addNotification(null,E('p',e.message));}};
-			return E('div', {}, [status,E('div', {'class':'apc-package-actions'}, [E('button',{type:'button','class':'cbi-button',...(data[6].stdout.trim()?{}:{disabled:true}),click:ui.createHandlerFn(this,run,'marm-only')},_('Tylko MARM do Zacisze')),E('button',{type:'button','class':'cbi-button',...(data[6].stdout.trim()?{}:{disabled:true}),click:ui.createHandlerFn(this,run,'both')},_('Dostęp w obu kierunkach'))])]);
-		};
+		o=s.option(form.DynamicList,'native_subnet',_('Natywne podsieci'),_('Adresy z pozostałych podsieci są oznaczone kolorami.'));o.datatype='cidr4';o.default=['10.48.18.0/24'];
+		s=m.section(form.GridSection,'vpn',_('Profile VPN'),_('Profile odpowiadają interfejsom i strefom firewalla. Różne, nienakładające się sieci mogą działać równocześnie.'));s.anonymous=false;s.addremove=true;s.nodescriptions=true;s.addbtntitle=_('Dodaj profil VPN');
+		o=s.option(form.Value,'name',_('Nazwa wyświetlana'));o.rmempty=false;
+		o=s.option(form.ListValue,'type',_('Typ'));o.value('existing','Istniejący interfejs SSTP / WireGuard');o.value('ikev2','IKEv2 — certyfikat klienta');o.default='ikev2';o.rmempty=false;o.textvalue=function(id){return uci.get('apcontroller',id,'type')==='ikev2'?'IKEv2 / certyfikat':'Istniejący interfejs';};
+		o=s.option(form.Flag,'enabled',_('Autostart VPN'));o.default='0';o.rmempty=false;
+		o=s.option(form.Value,'interface',_('Interfejs'));o.datatype='uciname';o.rmempty=false;
+		o=s.option(form.Value,'zone',_('Strefa firewalla'));o.datatype='uciname';o.rmempty=false;
+		o=s.option(form.Value,'local_subnet',_('Sieć MARM'));o.datatype='cidr4';o.default='10.48.18.0/24';o.rmempty=false;o.modalonly=true;
+		o=s.option(form.Value,'remote_subnet',_('Zdalna podsieć'));o.datatype='cidr4';o.rmempty=false;
+		o=s.option(form.ListValue,'mode',_('Kierunek inicjowania'));o.value('marm-only','Tylko MARM do zdalnej sieci');o.value('both','Obie strony (wymaga obsługi po stronie serwera)');o.default='marm-only';o.rmempty=false;o.textvalue=function(id){return uci.get('apcontroller',id,'mode')==='both'?'Obie strony':'Tylko MARM';};
+		for(const [key,label] of [['server','Serwer VPN'],['remote_id','Tożsamość serwera'],['cert','Certyfikat klienta'],['ca','Certyfikat CA'],['key','Plik klucza prywatnego']]) {o=s.option(form.Value,key,_(label));o.depends('type','ikev2');o.modalonly=true;o.rmempty=false;}
+		o=s.option(form.Value,'ifid',_('Identyfikator XFRM'));o.depends('type','ikev2');o.datatype='range(10,4095)';o.modalonly=true;o.rmempty=false;
+		o=s.option(form.DummyValue,'_vpnstatus',_('Stan'));o.cfgvalue=function(id){let states=[];try{states=JSON.parse(data[6].stdout||'[]');}catch(e){}return (states.find(p=>p.id===id)||{}).status||'Zapisz profil';};
+		o=s.option(form.DummyValue,'_vpnactions',_('Połączenie'));o.renderWidget=function(id){
+			const run=async action=>{try{await m.save();await uci.save();await uci.apply();const r=await fs.exec('/usr/bin/apcontroller-vpn',[action,id]);if(r.code)throw new Error(r.stderr||r.stdout||'Błąd VPN');ui.addNotification(null,E('p',r.stdout||'Gotowe'));}catch(e){ui.addNotification(null,E('p',e.message),'error');}};
+			return E('div',{'class':'apc-package-actions'},['apply','start','stop'].map(action=>E('button',{type:'button','class':'cbi-button',click:ui.createHandlerFn(this,run,action)},({apply:'Zastosuj profil',start:'Połącz',stop:'Rozłącz'})[action])).concat([E('a',{'class':'cbi-button',href:L.url('admin/network/network')},'Interfejsy'),E('a',{'class':'cbi-button',href:L.url('admin/network/firewall')},'Firewall')]));
+		};o.textvalue=function(id){return this.renderWidget(id);};
 
 		/*
 		 * ADDITIONAL SCRIPT
@@ -3034,7 +3070,7 @@ return view.extend({
 
 		return m.render().then(root => {
 			root.classList.add('apcontroller-page');
-			root.prepend(E('style', {}, '.apcontroller-page{min-width:0;max-width:100%;margin-left:0}.apcontroller-page .cbi-tblsection{min-width:0;max-width:100%;overflow-x:auto}.apcontroller-page table{margin-left:0!important;width:100%;font-size:.9em}.apcontroller-page table th,.apcontroller-page table td{padding:7px 6px!important;vertical-align:middle;overflow-wrap:anywhere}.apcontroller-page td[data-name="name"]{max-width:190px}.apcontroller-page td[data-name="_status"],.apcontroller-page td[data-name="ipaddr"]{white-space:nowrap}.apcontroller-page .cbi-section-actions{white-space:nowrap}.apcontroller-page .apc-package-status{white-space:pre-wrap;overflow-wrap:anywhere;max-height:250px;overflow:auto}.apc-package-actions{display:flex;gap:8px;flex-wrap:wrap}'));
+			root.prepend(E('style', {}, '.apcontroller-page{min-width:0;max-width:100%;margin-left:0}.apcontroller-page .cbi-tblsection{min-width:0;max-width:100%;overflow-x:auto}.apcontroller-page table{margin-left:0!important;width:100%;font-size:.9em}.apcontroller-page table th,.apcontroller-page table td{padding:7px 6px!important;vertical-align:middle;overflow-wrap:anywhere}.apcontroller-page td[data-name="name"]{max-width:190px}.apcontroller-page td[data-name="_status"],.apcontroller-page td[data-name="ipaddr"]{white-space:nowrap}.apcontroller-page .cbi-section-actions{white-space:nowrap}.apcontroller-page .apc-package-status{white-space:pre-wrap;overflow-wrap:anywhere;max-height:250px;overflow:auto}.apc-package-actions{display:flex;gap:8px;flex-wrap:wrap}.apc-client-summary{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.apc-client-summary>div{border:1px solid var(--border-color-medium);border-radius:6px;padding:8px 16px;display:flex;gap:12px;align-items:center}.apc-client-summary strong{font-size:1.35em}.apc-subnet{border-left:4px solid;padding:2px 7px;border-radius:3px;display:inline-block}.apc-subnet-legend{display:flex;gap:14px;flex-wrap:wrap}'));
 			root.querySelectorAll('#cbi-apcontroller-host table').forEach(table => { if (table.parentElement.id !== 'cbi-apcontroller-host') return; const wrap=E('div', {'class':'apc-table-scroll',style:'max-width:100%;overflow-x:auto'}); table.before(wrap); wrap.appendChild(table); });
 			return root;
 		});
