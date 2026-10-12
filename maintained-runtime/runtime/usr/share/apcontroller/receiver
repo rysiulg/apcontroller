@@ -1,0 +1,139 @@
+#!/bin/sh
+
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+
+#
+# Configuration is on controller only.
+#
+
+. /lib/functions.sh
+
+CONFIG="/etc/config/apcontroller"
+
+API_KEY=""
+PATH_BASE="/tmp/apcontroller"
+DEBUG="1"
+
+config_load apcontroller
+
+config_get API_KEY global api_key ""
+config_get PATH_BASE global path "/tmp/apcontroller"
+config_get DEBUG global debug "1"
+
+
+log()
+{
+	[ "$DEBUG" = "1" ] || return 0
+
+	logger -t apcontroller-receiver "$*"
+}
+
+
+#
+# Authentication
+#
+
+REQUEST_KEY="$HTTP_X_APCONTROLLER_KEY"
+
+[ -n "$API_KEY" ] || {
+	log "API key not configured"
+	echo "Status: 500"
+	echo "Content-Type: application/json"
+	echo
+	echo '{"error":"api key not configured"}'
+	exit 1
+}
+
+[ "$REQUEST_KEY" = "$API_KEY" ] || {
+	log "invalid API key"
+	echo "Status: 403"
+	echo "Content-Type: application/json"
+	echo
+	echo '{"error":"forbidden"}'
+	exit 1
+}
+
+
+#
+# Read JSON
+#
+
+CONTENT_LENGTH="${CONTENT_LENGTH:-0}"
+
+case "$CONTENT_LENGTH" in
+	''|*[!0-9]*)
+		echo "Status: 400"
+		echo "Content-Type: application/json"
+		echo
+		echo '{"error":"invalid content length"}'
+		exit 1
+		;;
+esac
+
+JSON="$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)"
+
+[ -n "$JSON" ] || {
+	echo "Status: 400"
+	echo "Content-Type: application/json"
+	echo
+	echo '{"error":"empty request"}'
+	exit 1
+}
+
+
+#
+# Validate JSON.
+#
+
+if ! jsonfilter -s "$JSON" -e '@' >/dev/null 2>&1; then
+	echo "Status: 400"
+	echo "Content-Type: application/json"
+	echo
+	echo '{"error":"invalid json"}'
+	exit 1
+fi
+
+
+#
+# Save / publish.
+#
+
+mkdir -p "$PATH_BASE"
+
+IPADDR="$(
+	printf '%s' "$JSON" |
+	jsonfilter -q -e '@.ipaddr' 2>/dev/null
+)"
+
+[ -n "$IPADDR" ] || IPADDR="unknown"
+
+SAFE_IP="$(printf '%s' "$IPADDR" | tr -c 'A-Za-z0-9_.-' '_')"
+
+printf '%s\n' "$JSON" > \
+	"${PATH_BASE}/${SAFE_IP}.json"
+
+
+#
+# Publish same JSON through ubus.
+#
+
+if ubus send apcontroller "$JSON" >/dev/null 2>&1; then
+	log "received data from $IPADDR"
+else
+	log "ubus send failed for $IPADDR"
+fi
+
+
+#
+# Response.
+#
+
+echo "Content-Type: application/json"
+echo
+
+printf '{'
+printf '"ok":true,'
+printf '"update":false'
+printf '}\n'
+
+exit 0

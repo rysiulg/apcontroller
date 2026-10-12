@@ -77,3 +77,7 @@ The file `/root/.ssh/known_hosts` stores public key fingerprints of SSH services
 
 If the AP’s key changes (for example, after a system reinstallation or a factory reset), its fingerprint will also change. In such a case, the SSH client will display a warning about a key mismatch. To restore the connection, the appropriate entry in the `/root/.ssh/known_hosts` file must be manually removed or updated, and the new host key must then be accepted when reconnecting.
 
+
+## Maintained runtime release
+
+The audited runtime release **20261012-r1** is available in [maintained-runtime/](maintained-runtime/README.md). It includes normalized client names and IP addresses, LuCI client aliases, serialized polling, contact timestamps and SSH host-key verification. Source, packaging scripts and signed-feed installation instructions are included. This snapshot leaves the existing SDK recipe/feed intact. Omada/MikroTik and push/HTTP support remain incomplete; see the release limitations.
