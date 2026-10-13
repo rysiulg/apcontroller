@@ -9,7 +9,7 @@ umask 077
 exec 8>/tmp/apcontroller-vpn.lock
 flock -n 8 || { echo 'Trwa inna operacja VPN' >&2; exit 1; }
 tmp=$(mktemp /tmp/apcontroller-vpn.XXXXXX)
-trap 'rm -f "$tmp"' EXIT
+trap 'rm -f "$tmp" "$tmp".*.changed' EXIT
 ucode /usr/share/multivpn-connect/profiles.uc "$action" "$selected" > "$tmp"
 . /lib/functions.sh
 config_load multivpn
@@ -30,11 +30,24 @@ if [ -z "$selected" ] && [ -s /etc/multivpn-connect/vpn-managed ]; then
     done < /etc/multivpn-connect/vpn-managed
 fi
 field(){ config_get "$1" "$id" "$2" "${3:-}"; }
+ike_child_up(){
+    timeout -k 2 5 swanctl --list-sas --ike "apc-$1" 2>/dev/null | awk -v ike="apc-$1:" -v child="apc-$1-lan:" '$1==ike && /ESTABLISHED/ {a=1} $1==child && /INSTALLED/ {b=1} END {exit !(a && b)}'
+}
+ike_restore_path(){
+    local profile="$1" vip mode
+    mode=$(uci -q get "multivpn.$profile.ike_mode" || echo vip)
+    vip=$(timeout -k 2 5 swanctl --list-sas --ike "apc-$profile" 2>/dev/null | sed -n 's/^  local .* \[\([0-9.]*\)\]$/\1/p' | head -1)
+    [ "$mode" = site-to-site ] || [ -n "$vip" ] || return 1
+    PLUTO_VERB=up-client PLUTO_MY_SOURCEIP4_1="$vip" /usr/bin/multivpn-updown "$profile"
+}
+connection_hash(){ sed '/^[[:space:]]*start_action[[:space:]]*=/d' "$1" | sha256sum | cut -d ' ' -f 1; }
+
 apply_profile(){
     id=$1
     [ -z "$selected" ] || [ "$id" = "$selected" ] || return 0
     field type type; field iface interface; field zone zone; field localnet local_subnet; field remotenet remote_subnet; field enabled enabled 0; field mode mode marm-only; field localzone local_zone lan; field gateway default_gateway 0
     previous_enabled=$enabled
+    ike_changed=1
     firewallremote=$remotenet; [ "$gateway" != 1 ] || firewallremote=0.0.0.0/0
     if [ "$action" = start ] && [ "$type" = ikev2 ] && [ -d /sys/module/crypto_safexcel ]; then echo 'IKE wymaga zaplanowanego restartu: crypto_safexcel jest nadal załadowany. Profil zapisany, połączenie nie zostało uruchomione.' >&2; return 1; fi
     if [ "$action" = stop ]; then
@@ -104,6 +117,8 @@ EOF
             printf '\nsecrets { eap-apc-%s { id = %s\n secret = "%s"\n} }\n' "$id" "$username" "$escaped" >> "/etc/swanctl/conf.d/apc-$id.conf.next"
         fi
         chmod 600 "/etc/swanctl/conf.d/apc-$id.conf.next"
+        if [ -f "/etc/swanctl/conf.d/apc-$id.conf" ] && [ "$(connection_hash "/etc/swanctl/conf.d/apc-$id.conf")" = "$(connection_hash "/etc/swanctl/conf.d/apc-$id.conf.next")" ]; then ike_changed=0; fi
+        printf '%s\n' "$ike_changed" > "$tmp.$id.changed"
         mv "/etc/swanctl/conf.d/apc-$id.conf.next" "/etc/swanctl/conf.d/apc-$id.conf"
     elif [ "$type" = sstp ]; then
         field server server; field username username; field password password; field ca ca
@@ -131,12 +146,26 @@ for id in $(jsonfilter -i "$tmp" -e '@[*].id'); do
     type=$(uci -q get "multivpn.$id.type"); iface=$(uci -q get "multivpn.$id.interface")
     enabled=$(uci -q get "multivpn.$id.enabled")
     if [ "$type" = ikev2 ] && [ "$enabled" = 1 ] && [ ! -d /sys/module/crypto_safexcel ]; then
+        ifup "$iface"
+        ready=0
+        for attempt in 1 2 3 4 5; do
+            if [ "$(ubus call "network.interface.$iface" status 2>/dev/null | jsonfilter -e '@.up')" = true ]; then ready=1; break; fi
+            sleep 1
+        done
+        [ "$ready" = 1 ] || { echo "Interfejs $iface nie został utworzony; nie inicjuję IKE." >&2; exit 1; }
+        ike_changed=$(cat "$tmp.$id.changed")
+        if ike_child_up "$id"; then
+            if [ "$ike_changed" = 0 ]; then ike_restore_path "$id"; echo "VPN $id jest już połączony; zachowano działający tunel."; continue; fi
+            echo "Zmieniono konfigurację IKE $id; ponowne zestawienie wyłącznie tego profilu."
+            timeout -k 2 10 swanctl --terminate --ike "apc-$id" >/dev/null
+        fi
         # --file in conf.d changes the credential base directory; load from the main config.
         timeout -k 2 10 swanctl --load-creds --noprompt >/dev/null
         timeout -k 2 10 swanctl --load-conns --file "/etc/swanctl/conf.d/apc-$id.conf" >/dev/null
         if [ "$action" = start ]; then
             if timeout -k 2 22 swanctl --initiate --ike "apc-$id" --child "apc-$id-lan" --timeout 20; then :; else
                 result=$?
+                if ike_child_up "$id"; then ike_restore_path "$id"; echo "Istniejący tunel $id jest zestawiony; zachowano go po odrzuceniu ponownej inicjacji."; continue; fi
                 uci set "multivpn.$id.enabled=$previous_enabled"; uci set "network.$iface.auto=$previous_enabled"; uci commit multivpn; uci commit network
                 timeout -k 2 5 swanctl --terminate --ike "apc-$id" >/dev/null 2>&1 || true
                 ifdown "$iface" >/dev/null 2>&1 || true
