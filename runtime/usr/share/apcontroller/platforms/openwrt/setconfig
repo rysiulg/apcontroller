@@ -13,6 +13,65 @@ FILE="$1"
 . /usr/share/libubox/jshn.sh
 
 NEEDCOMMIT=0
+umask 077
+mkdir -p /etc/apcontroller/before-send
+for cfg in network wireless; do [ -f /etc/apcontroller/before-send/$cfg ] || cp /etc/config/$cfg /etc/apcontroller/before-send/$cfg; done
+for path in /etc/config/network /etc/config/wireless /etc/apcontroller/before-send/; do grep -qxF "$path" /etc/sysupgrade.conf || echo "$path" >> /etc/sysupgrade.conf; done
+
+wifi_ensure_vlan(){
+	local net="$1" vid="$2" guestports links base sec bridge dev found vlanidx used oldproto primary port tagged
+	[ -n "$vid" ] || return 0
+	case "$net:$vid" in *[!a-zA-Z0-9_:]*) echo 'Nieprawidłowa sieć/VLAN' >&2; return 1;; esac
+	[ "$vid" -ge 2 ] && [ "$vid" -le 4094 ] || return 1
+	case "$net" in lan|wan|guest|loopback) echo 'Nie wolno zastąpić sieci zarządzającej VLAN-em Wi-Fi' >&2; return 1;; esac
+	oldproto=$(uci -q get network.$net.proto)
+	case "$oldproto" in ''|none) ;; *) echo 'Istniejący interfejs ma adres/routing; nie zostanie zastąpiony' >&2; return 1;; esac
+	guestports=$(uci -q get network.switch_guest.ports)
+	links=$(uci -q get network.dev_guest.ports)
+	if [ -z "$guestports" ] || [ -z "$links" ]; then echo "VLAN $vid: układ portów tego AP wymaga jawnej konfiguracji/użycia dodatkowego skryptu" >&2; return 1; fi
+	primary=''
+	for link in $(uci -q get network.dev_lan.ports); do case "$link" in eth*.1) primary=${link%.1}; break;; esac; done
+	[ -n "$primary" ] || { echo 'Nie znaleziono przewodowego interfejsu LAN; użyj jawnego dodatkowego skryptu' >&2; return 1; }
+	# One CPU/uplink path: bridging both CPU ports or wired and BATMAN creates a loop.
+	tagged=''; for port in $guestports; do [ "$port" = 6t ] || tagged="$tagged $port"; done
+	guestports=$tagged; links=$primary.12
+	found=0
+	for sec in $(uci -q show network | sed -n 's/^network\.\([^=]*\)=switch_vlan$/\1/p'); do
+		[ "$(uci -q get network.$sec.vid)" != "$vid" ] || found=1
+	done
+	if [ "$found" = 0 ]; then
+		vlanidx=''
+		for candidate in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+			used=0
+			for sec in $(uci -q show network | sed -n 's/^network\.\([^=]*\)=switch_vlan$/\1/p'); do [ "$(uci -q get network.$sec.vlan)" != "$candidate" ] || used=1; done
+			[ "$used" != 0 ] || { vlanidx=$candidate; break; }
+		done
+		[ -n "$vlanidx" ] || { echo 'Brak wolnego indeksu VLAN switcha' >&2; return 1; }
+		sec=apc_vlan_$vid
+		uci set network.$sec=switch_vlan; uci set network.$sec.device=switch0; uci set network.$sec.vlan="$vlanidx"; uci set network.$sec.vid="$vid"; uci set network.$sec.ports="$guestports"
+	fi
+	bridge=$(uci -q get network.$net.device)
+	case "$bridge" in br-*) ;; *) bridge=br-apc-$net;; esac
+	dev=''
+	for sec in $(uci -q show network | sed -n 's/^network\.\([^=]*\)=device$/\1/p'); do [ "$(uci -q get network.$sec.name)" != "$bridge" ] || dev=$sec; done
+	[ -n "$dev" ] || dev=apc_bridge_$net
+	uci set network.$dev=device; uci set network.$dev.name="$bridge"; uci set network.$dev.type=bridge
+	uci set network.$dev.stp=1; uci set network.$dev.forward_delay=2
+	uci -q delete network.$dev.ports
+	for link in $links; do
+		case "$link" in *.12) base=${link%.12};; *) continue;; esac
+		found=''
+		for sec in $(uci -q show network | sed -n 's/^network\.\([^=]*\)=device$/\1/p'); do [ "$(uci -q get network.$sec.name)" != "$base.$vid" ] || found=$sec; done
+		sec=apc_${net}_$base
+		[ -z "$found" ] || sec=$found
+		uci set network.$sec=device; uci set network.$sec.name="$base.$vid"; uci set network.$sec.ifname="$base"; uci set network.$sec.type=8021q; uci set network.$sec.vid="$vid"
+		uci -q del_list network.$dev.ports="$base.$vid"
+		uci add_list network.$dev.ports="$base.$vid"
+	done
+	uci set network.$net=interface; uci set network.$net.proto=none; uci set network.$net.device="$bridge"; uci -q delete network.$net.type
+	uci commit network
+	NEEDCOMMIT=1
+}
 
 
 wifi_set_macfilter() {
@@ -150,7 +209,9 @@ while json_is_a "$IDX" object; do
 		key \
 		hidden \
 		isolate \
+		vlan_id \
 		macfilter
+	wifi_ensure_vlan "$network" "$vlan_id" || exit 2
 
 	[ -n "$macfilter" ] || macfilter="disable"
 
@@ -329,6 +390,7 @@ done
 #
 if [ "$NEEDCOMMIT" -eq 1 ]; then
 	uci commit wireless
+	/etc/init.d/network reload >/dev/null
 	wifi reload
 fi
 

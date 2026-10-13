@@ -46,7 +46,7 @@ if command -v uci >/dev/null 2>&1; then
 	local_cfg="$(
 		uci -q get \
 			"${APC_UCI_PACKAGE}.@global[0].debug" \
-			2>/dev/null
+			2>/dev/null || true
 	)"
 
 	[ -n "$local_cfg" ] && APC_DEBUG="$local_cfg"
@@ -54,7 +54,7 @@ if command -v uci >/dev/null 2>&1; then
 	local_log="$(
 		uci -q get \
 			"${APC_UCI_PACKAGE}.@global[0].logfile" \
-			2>/dev/null
+			2>/dev/null || true
 	)"
 
 	[ -n "$local_log" ] && APC_LOGFILE="$local_log"
@@ -62,7 +62,7 @@ if command -v uci >/dev/null 2>&1; then
 	local_path="$(
 		uci -q get \
 			"${APC_UCI_PACKAGE}.@global[0].path" \
-			2>/dev/null
+			2>/dev/null || true
 	)"
 
 	[ -n "$local_path" ] && BASEPATH="$local_path"
@@ -87,13 +87,13 @@ apc_config_init()
 	#
 	if command -v uci >/dev/null 2>&1; then
 
-		path="$(uci -q get apcontroller.@global[0].path 2>/dev/null)"
+		path="$(uci -q get apcontroller.@global[0].path 2>/dev/null || true)"
 		[ -n "$path" ] || path="$BASEPATH"
 
-		debug="$(uci -q get apcontroller.@global[0].debug 2>/dev/null)"
+		debug="$(uci -q get apcontroller.@global[0].debug 2>/dev/null || true)"
 		[ -n "$debug" ] || debug="$APC_DEBUG"
 
-		logfile="$(uci -q get apcontroller.@global[0].logfile 2>/dev/null)"
+		logfile="$(uci -q get apcontroller.@global[0].logfile 2>/dev/null || true)"
 		[ -n "$logfile" ] || logfile="$APC_LOGFILE"
 
 	fi

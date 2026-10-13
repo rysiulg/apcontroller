@@ -8,6 +8,7 @@
 'require uci';
 'require ui';
 'require view';
+const apcCommit=rpc.declare({object:'uci',method:'commit',params:['config'],reject:true});
 
 let callHostHints;
 let callAPControllerActivity;
@@ -100,9 +101,9 @@ return view.extend({
 			callAPController(),
 			L.resolveDefault(fs.read_direct(additionalScriptFile), ''),
 			uci.load('apcontroller'),
+			L.resolveDefault(uci.load('multivpn'),null),
 			Promise.resolve(null),
-			Promise.resolve(null),
-			L.resolveDefault(fs.exec('/usr/bin/apcontroller-vpn', ['status']), {stdout:'[]'})
+			Promise.resolve(null)
 		]);
 	},
 
@@ -137,8 +138,7 @@ return view.extend({
 					'error'
 				);
 			})
-			.then(() => this.super('handleSaveApply', [ev, mode]))
-			.then(async () => { const r=await fs.exec('/usr/bin/apcontroller-vpn',['apply']); if(r.code)throw new Error(r.stderr||r.stdout||'Błąd konfiguracji VPN'); })
+			.then(() => this.super('handleSave', [ev]).then(()=>apcCommit('apcontroller')))
 			.then(() => {
 				const container =
 					document.querySelector('.cbi-value[data-name="interval"]');
@@ -247,7 +247,7 @@ return view.extend({
 		function subnetTag(value) {
 			const ips=String(value||'').match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)||[], native=L.toArray(uci.get('apcontroller','@global[0]','native_subnet')||['10.48.18.0/24']);
 			const ip=ips.find(ip=>ipv4(ip)!=null&&!native.some(c=>inSubnet(ip,c))); if(!ip)return null;
-			const profile=uci.sections('apcontroller','vpn').find(p=>inSubnet(ip,p.remote_subnet));
+			const profile=uci.sections('multivpn','vpn').find(p=>inSubnet(ip,p.remote_subnet));
 			const label=profile?profile.remote_subnet:ip.split('.').slice(0,3).join('.')+'.0/24'; let hash=0; for(const c of label)hash=(hash*31+c.charCodeAt(0))>>>0;
 			return {label:label, color:['#3973b9','#9855a6','#ad6500','#147d78','#a34c66'][hash%5]};
 		}
@@ -1689,6 +1689,7 @@ return view.extend({
 		 */
 		s.actionExec=function(section_id){
 	const row=this.cfgvalue(section_id);
+	if(row.platform==='omada'){ui.addNotification(null,E('p','Omada udostępnia CLI, nie powłokę do skryptów OpenWrt. Użyj kontrolera Omada do konfiguracji.'));return Promise.resolve();}
 
 	return callAPControllerScripts().then(function(res){
 		res.scripts.sort((a,b)=>a.file.localeCompare(b.file));
@@ -2096,6 +2097,12 @@ return view.extend({
 			'0'
 		);
 
+		o=s.taboption('host',form.Value,'authorizedkey','Klucz publiczny do dopisania na AP','Pojedynczy publiczny klucz SSH. Dopisywanie obsługiwane dla root na OpenWrt; nie wklejaj klucza prywatnego.');o.modalonly=true;o.rmempty=true;
+		o=s.taboption('host',form.DummyValue,'_authorizekey','Instalacja klucza');o.modalonly=true;o.renderWidget=function(id){return E('button',{type:'button','class':'cbi-button',click:ui.createHandlerFn(this,async()=>{try{await m.save();await uci.save();await apcCommit('apcontroller');const r=await fs.exec('/usr/bin/apcontroller-authorize-key',[id]);if(r.code)throw new Error(r.stderr||r.stdout);ui.addNotification(null,E('p',r.stdout));}catch(e){ui.addNotification(null,E('p',e.message),'error');}})},'Dopisz klucz publiczny na AP');};
+
+		o=s.taboption('host',form.DummyValue,'_management','Obsługa urządzenia');o.cfgvalue=function(id){const p=uci.get('apcontroller',id,'platform')||(devicestatus.hosts||[]).find(h=>h.section===id)?.platform||'nieznana';return p==='openwrt'?'Odczyt, konfiguracja Wi-Fi i skrypty przez SSH':'Odczyt '+p+'; konfigurację Wi-Fi prowadź w kontrolerze producenta';};
+		o=s.taboption('host',form.DummyValue,'_sshhelp','Dostęp SSH');o.modalonly=true;o.cfgvalue=()=> 'Login i hasło powyżej służą do dostępu do AP. Tryb klucza wymaga istniejącego prywatnego pliku na routerze i dopisanego klucza publicznego na AP. Skrypty: menu urządzenia → Execute; pliki na routerze /usr/share/apcontroller/scripts/. Omada CLI nie wykonuje skryptów powłoki.';
+
 		Object.entries(
 			devicesmorecolumns
 		).forEach(([key, value]) => {
@@ -2303,11 +2310,11 @@ return view.extend({
 
 		o.textvalue = function(section_id) {
 			const cfgvalues =
-				this.map.data.get(
+				L.toArray(this.map.data.get(
 					'apcontroller',
 					section_id,
 					'band'
-				) || [];
+				));
 
 			let names = [];
 
@@ -2472,6 +2479,7 @@ return view.extend({
 		};
 
 		o.default = 'lan';
+		o=s.taboption('wifi',form.Value,'vlan_id','VLAN na AP (opcjonalnie)','Przy wysyłaniu przygotuj interfejs bez adresu i tagowanie jak istniejący VLAN gościnny. Obsługiwany wykryty układ switch_guest/dev_guest na OpenWrt; inne układy wymagają dodatkowego skryptu. Nie zmienia VLAN-ów na głównym routerze.');o.datatype='range(2,4094)';o.modalonly=true;o.rmempty=true;
 
 		o = s.taboption(
 			'wifi',
@@ -2520,6 +2528,14 @@ return view.extend({
 			'deny'
 		);
 
+		o=s.taboption('wifi',form.DummyValue,'_assignedgroups','Przypisane w grupach');o.cfgvalue=function(id){return uci.sections('apcontroller','group').filter(g=>L.toArray(g.wifi).includes(id)).map(g=>(g.name||g['.name'])+': '+L.toArray(g.host).map(h=>uci.get('apcontroller',h,'name')||h).join(', ')).join('; ')||'Brak przypisania';};
+		o=s.taboption('wifi',form.DummyValue,'_observedaps','SSID widoczne na AP');o.cfgvalue=function(id){const ssid=uci.get('apcontroller',id,'ssid');return (devicestatus.hosts||[]).filter(h=>h.online===1&&h['.lastcontact']<=Number(uci.get('apcontroller','@global[0]','interval')||5)*150&&(h.wifi||[]).some(w=>w.ssid===ssid)).map(h=>h.name||h.hostname||h.ipaddr).join(', ')||'Brak bieżącego odczytu tego SSID';};
+		o=s.taboption('wifi',form.MultiValue,'_targets','Przypisanie bezpośrednie do OpenWrt','Tworzy osobną grupę dla tego szablonu. Zapis przypisania nie wysyła konfiguracji. Istniejące grupy pozostają niezależne.');o.modalonly=true;o.rmempty=true;
+		const writableAP=id=>(uci.get('apcontroller',id,'platform')||(devicestatus.hosts||[]).find(h=>h.section===id)?.platform)==='openwrt';
+		uci.sections('apcontroller','host').filter(h=>writableAP(h['.name'])).forEach(h=>o.value(h['.name'],(h.name||h['.name'])+' ('+h.ipaddr+')'));
+		o.cfgvalue=function(id){return L.toArray(uci.get('apcontroller','map_'+id,'host'));};o.write=function(id,value){const group='map_'+id,targets=L.toArray(value).filter(Boolean);if(!targets.length){if(uci.get('apcontroller',group,'managed_wifi')===id)uci.remove('apcontroller',group);return;}if(!uci.get('apcontroller',group))uci.add('apcontroller','group',group);uci.set('apcontroller',group,'name','Wi-Fi: '+(uci.get('apcontroller',id,'name')||id));uci.set('apcontroller',group,'managed_wifi',id);uci.set('apcontroller',group,'host',targets);uci.set('apcontroller',group,'wifi',[id]);uci.set('apcontroller',group,'delete','0');uci.set('apcontroller',group,'useadditionalscript','0');};o.remove=function(id){this.write(id,[]);};
+		o=s.taboption('wifi',form.DummyValue,'_sendtargets','Wysyłanie do przypisanych AP');o.renderWidget=function(id){return E('button',{type:'button','class':'cbi-button',click:ui.createHandlerFn(this,async()=>{try{await m.save();await uci.save();await apcCommit('apcontroller');const r=await fs.exec('/usr/bin/apcontroller-sendconfig',['map_'+id,'verbose']);ui.showModal('Wynik wysyłania',[E('pre',{},r.stdout||r.stderr||'Brak przypisanych AP'),E('button',{type:'button','class':'cbi-button',click:ui.hideModal},'Zamknij')]);}catch(e){ui.addNotification(null,E('p',e.message),'error');}})},'Wyślij konfigurację Wi-Fi');};o.modalonly=true;
+
 		/*
 		 * AP GROUP
 		 */
@@ -2527,7 +2543,8 @@ return view.extend({
 		s = m.section(
 			form.GridSection,
 			'group',
-			_('AP Group')
+			_('AP Group'),
+			'Grupa łączy urządzenia AP z szablonami Wi-Fi. Wyślij zmienia konfigurację tylko zgodnych OpenWrt; UniFi i Omada mają obecnie odczyt.'
 		);
 
 		s.addremove = true;
@@ -2598,7 +2615,7 @@ return view.extend({
 			section_id,
 			ev
 		) {
-			return this.map.save()
+			return this.map.save().then(()=>uci.save()).then(()=>apcCommit('apcontroller'))
 				.then(() => {
 					ui.showModal(
 						_('Sending commands'),
@@ -2732,11 +2749,11 @@ return view.extend({
 
 		o.textvalue = function(section_id) {
 			const cfgvalues =
-				this.map.data.get(
+				L.toArray(this.map.data.get(
 					'apcontroller',
 					section_id,
 					'host'
-				) || [];
+				));
 
 			let names = [];
 
@@ -2814,11 +2831,11 @@ return view.extend({
 
 		o.textvalue = function(section_id) {
 			const cfgvalues =
-				this.map.data.get(
+				L.toArray(this.map.data.get(
 					'apcontroller',
 					section_id,
 					'wifi'
-				) || [];
+				));
 
 			let names = [];
 
@@ -2840,7 +2857,7 @@ return view.extend({
 			return names.join(', ');
 		};
 
-		s = m.section(form.GridSection, 'client', _('Client names'));
+		s = m.section(form.GridSection, 'client', _('Nazwy klientów'), 'Własne nazwy przypisane do MAC. Mają pierwszeństwo przed nazwami DHCP i AP; nie zmieniają konfiguracji urządzenia.');
 		s.anonymous = true; s.addremove = true;
 		o = s.option(form.Value, 'mac', _('MAC Address'));
 		o.datatype = 'macaddr'; o.rmempty = false;
@@ -2939,22 +2956,6 @@ return view.extend({
 			o.value(key, value);
 		});
 		o=s.option(form.DynamicList,'native_subnet',_('Natywne podsieci'),_('Adresy z pozostałych podsieci są oznaczone kolorami.'));o.datatype='cidr4';o.default=['10.48.18.0/24'];
-		s=m.section(form.GridSection,'vpn',_('Profile VPN'),_('Profile odpowiadają interfejsom i strefom firewalla. Różne, nienakładające się sieci mogą działać równocześnie.'));s.anonymous=false;s.addremove=true;s.nodescriptions=true;s.addbtntitle=_('Dodaj profil VPN');
-		o=s.option(form.Value,'name',_('Nazwa wyświetlana'));o.rmempty=false;
-		o=s.option(form.ListValue,'type',_('Typ'));o.modalonly=true;o.value('existing','Istniejący interfejs SSTP / WireGuard');o.value('ikev2','IKEv2 — certyfikat klienta');o.default='ikev2';o.rmempty=false;o.textvalue=function(id){return uci.get('apcontroller',id,'type')==='ikev2'?'IKEv2 / certyfikat':'Istniejący interfejs';};
-		o=s.option(form.Flag,'enabled',_('Autostart VPN'));o.default='0';o.rmempty=false;
-		o=s.option(form.Value,'interface',_('Interfejs'));o.modalonly=true;o.datatype='uciname';o.rmempty=false;
-		o=s.option(form.Value,'zone',_('Strefa firewalla'));o.modalonly=true;o.datatype='uciname';o.rmempty=false;
-		o=s.option(form.Value,'local_subnet',_('Sieć MARM'));o.datatype='cidr4';o.default='10.48.18.0/24';o.rmempty=false;o.modalonly=true;
-		o=s.option(form.Value,'remote_subnet',_('Zdalna podsieć'));o.datatype='cidr4';o.rmempty=false;
-		o=s.option(form.ListValue,'mode',_('Kierunek inicjowania'));o.value('marm-only','Tylko MARM do zdalnej sieci');o.value('both','Obie strony (wymaga obsługi po stronie serwera)');o.default='marm-only';o.rmempty=false;o.textvalue=function(id){return uci.get('apcontroller',id,'mode')==='both'?'Obie strony':'Tylko MARM';};
-		for(const [key,label] of [['server','Serwer VPN'],['remote_id','Tożsamość serwera'],['cert','Certyfikat klienta'],['ca','Certyfikat CA'],['key','Plik klucza prywatnego']]) {o=s.option(form.Value,key,_(label));o.depends('type','ikev2');o.modalonly=true;o.rmempty=false;}
-		o=s.option(form.Value,'ifid',_('Identyfikator XFRM'));o.depends('type','ikev2');o.datatype='range(10,4095)';o.modalonly=true;o.rmempty=false;
-		o=s.option(form.DummyValue,'_vpnstatus',_('Stan'));o.cfgvalue=function(id){let states=[];try{states=JSON.parse(data[6].stdout||'[]');}catch(e){}return (states.find(p=>p.id===id)||{}).status||'Zapisz profil';};
-		o=s.option(form.DummyValue,'_vpnactions',_('Połączenie'));o.renderWidget=function(id,compact){
-			const run=async action=>{try{await m.save();await uci.save();await uci.apply();const r=await fs.exec('/usr/bin/apcontroller-vpn',[action,id]);if(r.code)throw new Error(r.stderr||r.stdout||'Błąd VPN');ui.addNotification(null,E('p',r.stdout||'Gotowe'));}catch(e){ui.addNotification(null,E('p',e.message),'error');}};
-			return E('div',{'class':'apc-package-actions'},['apply','start','stop'].map(action=>E('button',{type:'button','class':'cbi-button',click:ui.createHandlerFn(this,run,action)},({apply:'Zastosuj profil',start:'Połącz',stop:'Rozłącz'})[action])).concat(compact?[]:[E('a',{'class':'cbi-button',href:L.url('admin/network/network')},'Interfejsy'),E('a',{'class':'cbi-button',href:L.url('admin/network/firewall')},'Firewall')]));
-		};o.textvalue=function(id){return this.renderWidget(id,true);};
 
 		/*
 		 * ADDITIONAL SCRIPT

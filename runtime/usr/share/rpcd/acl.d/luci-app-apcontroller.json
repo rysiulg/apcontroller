@@ -27,7 +27,8 @@
 				]
 			},
 			"uci": [
-				"apcontroller"
+				"apcontroller",
+				"multivpn"
 			]
 		},
 		"write": {
@@ -42,9 +43,6 @@
 					"exec"
 				],
 				"/usr/bin/apcontroller-package": [
-					"exec"
-				],
-				"/usr/sbin/zacisze-vpn-mode": [
 					"exec"
 				],
 				"/usr/bin/apcontroller-sendconfig": [
@@ -62,7 +60,7 @@
 				"/usr/share/apcontroller/apcontroller.user": [
 					"write"
 				],
-				"/usr/bin/apcontroller-vpn": [
+				"/usr/bin/apcontroller-authorize-key": [
 					"exec"
 				]
 			},

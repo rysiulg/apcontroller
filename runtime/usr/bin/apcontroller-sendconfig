@@ -167,7 +167,7 @@ get_agent() {
 
 	case "$platform" in
 		openwrt)
-			echo "/usr/share/apcontroller/apcontroller-agent-setconfig-openwrt"
+			echo "/usr/share/apcontroller/platforms/openwrt/setconfig"
 			;;
 		ubiquiti)
 			echo "/usr/share/apcontroller/apcontroller-agent-setconfig-ubiquiti"
@@ -186,7 +186,7 @@ get_agent() {
 # Generate JSON.
 #
 T=$(uci -q get apcontroller."$SEC")
-[ "$T" = "group" ] || exit 0
+[ "$T" = "group" ] || { echo "Brak przypisanej grupy Wi-Fi" >&2; exit 2; }
 
 HOSTS=$(uci -q get apcontroller."$SEC".host)
 [ -n "$HOSTS" ] || exit 0
@@ -211,6 +211,7 @@ for WIFI in $WIFIS; do
 	BANDS=$(uci -q get apcontroller."$WIFI".band)
 
 	MACFILTER=$(uci -q get apcontroller."$WIFI".macfilter)
+	VLAN_ID=$(uci -q get apcontroller."$WIFI".vlan_id)
 	[ -n "$MACFILTER" ] || MACFILTER="disable"
 
 	MACLIST=$(uci -q get apcontroller."$WIFI".maclist)
@@ -219,6 +220,7 @@ for WIFI in $WIFIS; do
 	for BAND in $BANDS; do
 
 		json_add_object
+		json_add_string "vlan_id" "$VLAN_ID"
 
 		json_add_int \
 			"enabled" \
@@ -359,6 +361,9 @@ for HOST in $HOSTS; do
 	fi
 
 
+	# Only the OpenWrt writer is implemented; vendor placeholders must not report success.
+	if [ "$platform" != openwrt ]; then echo "$HOST ($ipaddr) [$platform]: POMINIETO - tylko odczyt, brak adaptera konfiguracji Wi-Fi"; continue; fi
+
 	#
 	# SSH options.
 	#
@@ -387,7 +392,7 @@ for HOST in $HOSTS; do
 	REMOTE_AGENT=""
 
 	if [ -n "$AGENT" ]; then
-		REMOTE_AGENT="/tmp/$(basename "$AGENT")"
+		REMOTE_AGENT="/tmp/apcontroller-agent-setconfig-openwrt"
 	fi
 
 

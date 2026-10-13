@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+action=${1:-report}; id=${2:-all}
+case "$id" in ''|*[!a-z0-9_]*|?????????????*) exit 2;; esac
+umask 077
+dir=/etc/multivpn-connect/reports
+mkdir -p "$dir"
+log="$dir/$id.log"; state="$dir/$id.result"
+case "$action" in
+ report)
+    exec ucode -e 'import {readfile} from "fs";let base=ARGV[0],state=readfile(base+".result"),out=readfile(base+".log");printf("%J\n",{done:!!state,code:state?int(trim(state)):null,output:out||"Brak operacji dla tego profilu."});' "$dir/$id"
+    ;;
+ _run)
+    operation=${3:-}; case "$operation" in apply|start|stop) ;; *) exit 2;; esac
+    printf 'Operacja: %s · profil: %s\nRozpoczęcie: %s\n' "$operation" "$id" "$(date '+%Y-%m-%d %H:%M:%S %Z')" > "$log"
+    selected=$id; [ "$id" != all ] || selected=''
+    syslog=/var/log/remote/$(uci -q get system.@system[0].hostname).log
+    before=$(wc -l < "$syslog" 2>/dev/null || echo 0)
+    set +e
+    /usr/bin/multivpn-connect "$operation" "$selected" >> "$log" 2>&1
+    code=$?
+    if [ "$code" = 0 ] && [ "$operation" = start ]; then
+        connected=0
+        for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            connected=$(/usr/bin/multivpn-connect status | ucode -e 'import {readfile} from "fs";let states=json(readfile("/dev/stdin"));printf("%s",(filter(states,p=>p.id==ARGV[0])[0]||{}).connected?"1":"0");' "$id")
+            [ "$connected" != 1 ] || break
+            sleep 1
+        done
+        if [ "$connected" = 1 ]; then echo "VPN zestawiony — potwierdzono stan połączenia." >> "$log"; else echo "VPN nie został zestawiony w czasie testu. Konfigurację zapisano; sprawdź diagnostykę." >> "$log"; code=20; fi
+    fi
+    if [ -f "$syslog" ]; then printf '\nDiagnostyka strongSwan z czasu operacji:\n' >> "$log"; tail -n +"$((before+1))" "$syslog" | grep -E "apc-$id|AUTHENTICATION_FAILED|TS_UNACCEPTABLE|NO_PROPOSAL|retransmit|certificate|EAP" | tail -30 >> "$log"; fi
+    printf '\nZakończenie: %s\nKod wyniku: %s\nStan po operacji:\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$code" >> "$log"
+    /usr/bin/multivpn-connect status >> "$log" 2>&1
+    mkdir -p "$dir/history"
+    cp "$log" "$dir/history/$id-$(date +%Y%m%d-%H%M%S)-$operation-$$.log"
+    for old in $(ls -t "$dir/history/"*.log 2>/dev/null | sed -n '101,$p'); do rm -f "$old"; done
+    printf '%s\n' "$code" > "$state"
+    exit "$code"
+    ;;
+ apply|start|stop)
+    exec 9>"$dir/$id.lock"
+    flock -n 9 || { echo 'Trwa operacja dla tego profilu' >&2; exit 1; }
+    if [ -f "$dir/$id.pid" ] && kill -0 "$(cat "$dir/$id.pid")" 2>/dev/null && tr '\0' ' ' < "/proc/$(cat "$dir/$id.pid")/cmdline" | grep -qF "$0 _run $id "; then echo 'Trwa poprzednia operacja VPN' >&2; exit 1; fi
+    rm -f "$state"
+    printf 'Operacja %s została przyjęta dla profilu %s.\n' "$action" "$id" > "$log"
+    setsid "$0" _run "$id" "$action" >/dev/null 2>&1 < /dev/null 9>&- &
+    printf '%s\n' "$!" > "$dir/$id.pid"
+    cat "$log"
+    ;;
+ *) exit 2;;
+esac

@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+mkdir -p /etc/apcontroller
+cp -p /etc/apk/world /etc/apcontroller/world.snapshot
+# Preserve the audit snapshot, never restore old kernel/libc constraints over a new image.
+sed -i '\|^/etc/apk/world$|d' /etc/sysupgrade.conf
+ucode -e '
+import {readfile,writefile} from "fs";
+let path="/www/luci-static/resources/view/attendedsysupgrade/overview.js",s=readfile(path),script=readfile("/usr/share/apcontroller/asu-defaults.sh");
+if(!s||!script)exit(0);
+if(index(s,"APCONTROLLER_ASU_RESTORE")>=0)exit(0);
+let point="return[data,firmware];";
+if(index(s,point)<0){warn("ASU client changed; automatic custom-package integration not applied\n");exit(0);}
+let js="/* APCONTROLLER_ASU_RESTORE */const customNames=[\"apcontroller\",\"luci-apcontroller\",\"luci-app-apcontroller\",\"luci-i18n-apcontroller-pl\",\"multivpn-connect\",\"luci-app-multivpn-connect\",\"sstp-client\"];data.custom_restore=customNames.filter(n=>Object.prototype.hasOwnProperty.call(firmware.packages,n));if(data.custom_restore.length){firmware.packages=Object.fromEntries(Object.entries(firmware.packages).filter(([n])=>!customNames.includes(n)));firmware.defaults="+sprintf("%J",script)+";}"+point;
+s=replace(s,point,js);
+let marker="E(\x27p\x27,_(\x27Currently running: %s - %s\x27)";
+s=replace(s,marker,"data.custom_restore&&data.custom_restore.length?E(\x27p\x27,\x27Pakiety własne będą ponownie instalowane z podpisanego repozytorium po uruchomieniu firmware. Zachowaj ustawienia i prywatną konfigurację.\x27):null,"+marker);
+writefile(path,s);
+'
+for path in /www/luci-static/resources/view/attendedsysupgrade/overview.js /etc/apcontroller/ /etc/apk/repositories.d/customfeeds.list /etc/apk/keys/apcontroller-local.pem; do grep -qxF "$path" /etc/sysupgrade.conf || echo "$path" >> /etc/sysupgrade.conf; done
+echo 'ASU will restore custom packages from the signed feed after boot; private configuration stays in the backup.'

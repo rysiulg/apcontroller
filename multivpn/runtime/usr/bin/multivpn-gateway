@@ -1,0 +1,53 @@
+#!/bin/sh
+set -e
+exec 9>/tmp/multivpn-gateway.lock
+flock -n 9 || exit 0
+ucode /usr/share/multivpn-connect/profiles.uc apply >/dev/null
+. /lib/functions.sh
+config_load multivpn
+mkdir -p /etc/multivpn-connect
+umask 077
+registry=/etc/multivpn-connect/gateway-managed
+if [ -f "$registry" ]; then
+    while read -r oldid oldtable oldnet; do
+        case "$oldid:$oldtable:$oldnet" in *[!a-z0-9_:./]*) exit 2;; esac
+        [ "$oldtable" -ge 200 ] && [ "$oldtable" -le 4095 ] || exit 2
+        pref=$((20000+oldtable*2))
+        ip rule del priority "$pref" from "$oldnet" lookup main suppress_prefixlength 0 2>/dev/null || true
+        ip rule del priority "$((pref+1))" from "$oldnet" lookup "$oldtable" 2>/dev/null || true
+        ip route del table "$oldtable" default 2>/dev/null || true
+        nft delete table ip "mvpgw_$oldid" 2>/dev/null || true
+    done < "$registry"
+fi
+next=$(mktemp /etc/multivpn-connect/gateway-managed.XXXXXX)
+trap 'rm -f "$next"' EXIT
+sync_gateway(){
+    local id="$1" table pref iface localnet enabled gateway status dev
+    config_get table "$id" gateway_table
+    case "$table" in ''|*[!0-9]*) return 0;; esac
+    [ "$table" -ge 200 ] && [ "$table" -le 4095 ] || return 2
+    pref=$((20000+table*2))
+    config_get iface "$id" interface; config_get localnet "$id" local_subnet; config_get enabled "$id" enabled 0; config_get gateway "$id" default_gateway 0
+    [ "$enabled:$gateway" = 1:1 ] || return 0
+    if [ -n "$(ip route show table "$table" 2>/dev/null)" ] || ip rule show | grep -q "lookup $table"; then echo "Tabela $table jest już używana; wybierz inną" >&2; return 2; fi
+    status=$(ubus call "network.interface.$iface" status 2>/dev/null) || return 0
+    [ "$(printf '%s' "$status" | jsonfilter -e '@.up')" = true ] || return 0
+    dev=$(printf '%s' "$status" | jsonfilter -e '@.l3_device')
+    case "$dev" in ''|*[!a-zA-Z0-9_.:-]*) return 2;; esac
+    if [ "$(uci -q get multivpn.$id.type)" = ikev2 ]; then [ -f "/tmp/apcontroller-vpn-$id.json" ] || return 0; fi
+    ip route replace table "$table" default dev "$dev"
+    ip rule add priority "$pref" from "$localnet" lookup main suppress_prefixlength 0
+    ip rule add priority "$((pref+1))" from "$localnet" lookup "$table"
+    if [ "$(uci -q get multivpn.$id.type)" != ikev2 ]; then
+        nft -f - <<EOF
+table ip mvpgw_$id {
+ chain vpn_snat { type nat hook postrouting priority 99; policy accept;
+  oifname "$dev" ip saddr $localnet masquerade
+ }
+}
+EOF
+    fi
+    printf '%s %s %s\n' "$id" "$table" "$localnet" >> "$next"
+}
+config_foreach sync_gateway vpn
+mv "$next" "$registry"
