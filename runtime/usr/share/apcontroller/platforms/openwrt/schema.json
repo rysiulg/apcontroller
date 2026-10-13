@@ -1,7 +1,6 @@
 {
   "version": "7.3",
   "platform": "openwrt",
-
   "fields": [
     {
       "name": "type",
@@ -12,7 +11,6 @@
       },
       "default": ""
     },
-
     {
       "name": "platform",
       "type": "string",
@@ -22,7 +20,6 @@
       },
       "default": ""
     },
-
     {
       "name": "hostname",
       "type": "string",
@@ -36,7 +33,6 @@
       },
       "default": ""
     },
-
     {
       "name": "model",
       "type": "string",
@@ -50,7 +46,6 @@
       },
       "default": ""
     },
-
     {
       "name": "software",
       "type": "string",
@@ -60,7 +55,6 @@
       },
       "default": ""
     },
-
     {
       "name": "uptime",
       "type": "number",
@@ -70,7 +64,6 @@
       },
       "default": 0
     },
-
     {
       "name": "load",
       "type": "string",
@@ -80,7 +73,6 @@
       },
       "default": ""
     },
-
     {
       "name": "lastcontact",
       "type": "number",
@@ -90,7 +82,6 @@
       },
       "default": 0
     },
-
     {
       "name": "ipaddr",
       "type": "string",
@@ -104,7 +95,6 @@
       },
       "default": ""
     },
-
     {
       "name": "mac",
       "type": "string",
@@ -118,7 +108,6 @@
       },
       "default": ""
     },
-
     {
       "name": "wifi",
       "type": "array",
@@ -127,7 +116,6 @@
       },
       "default": []
     },
-
     {
       "name": "clients",
       "type": "array",
@@ -136,7 +124,6 @@
       },
       "default": []
     },
-
     {
       "name": "clientslist2g",
       "type": "array",
@@ -149,7 +136,6 @@
       },
       "default": []
     },
-
     {
       "name": "clientslist5g",
       "type": "array",
@@ -162,7 +148,6 @@
       },
       "default": []
     },
-
     {
       "name": "clientslist6g",
       "type": "array",
@@ -174,45 +159,53 @@
         }
       },
       "default": []
+    },
+    {
+      "name": "network_names",
+      "type": "string",
+      "source": {
+        "command": "uci -q show network | sed -n 's/^network\\.\\([^=]*\\)=interface$/\\1/p' | tr '\\n' ' '",
+        "extract": "^(.+)$"
+      },
+      "default": ""
+    },
+    {
+      "name": "vlan_ids",
+      "type": "string",
+      "source": {
+        "command": "uci -q show network | awk -F= '/\\.vid=/ {gsub(/[^0-9]/,\"\",$2);print $2}' | sort -nu | tr '\\n' ' ' ",
+        "extract": "^(.+)$"
+      },
+      "default": ""
     }
   ],
-
   "collections": {
-
     "wifi": {
       "type": "array",
-
       "description": "Active AP interfaces discovered using iw. Wi-Fi band is derived from operating frequency.",
-
       "source": {
         "command": "for iface in $(iw dev 2>/dev/null | awk '$1==\"Interface\"{print $2}'); do case \"$iface\" in mon*|*mon) continue;; esac; iw dev \"$iface\" info 2>/dev/null | awk -v iface=\"$iface\" 'function esc(s){gsub(/\\\\/,\"\\\\\\\\\",s);gsub(/\"/,\"\\\\\\\"\",s);return s} BEGIN{ssid=\"\";channel=\"\";frequency=0;type=\"\"} /^[[:space:]]*ssid /{sub(/^[[:space:]]*ssid /,\"\",$0);ssid=$0} /^[[:space:]]*channel /{channel=$2;frequency=$3;gsub(/[()]/,\"\",frequency)} /^[[:space:]]*type /{type=$2} END{if(type==\"AP\" && frequency ~ /^[0-9]+$/){band=(frequency<3000?\"2g\":(frequency<5925?\"5g\":\"6g\"));printf \"{\\\"ifname\\\":\\\"%s\\\",\\\"ssid\\\":\\\"%s\\\",\\\"channel\\\":\\\"%s\\\",\\\"frequency\\\":%d,\\\"band\\\":\\\"%s\\\"}\\n\",esc(iface),esc(ssid),channel,frequency,band}}'; done",
         "format": "jsonl"
       },
-
       "item": {
         "type": "object",
-
         "fields": {
           "ifname": {
             "type": "string",
             "source": "ifname"
           },
-
           "ssid": {
             "type": "string",
             "source": "ssid"
           },
-
           "channel": {
             "type": "string",
             "source": "channel"
           },
-
           "frequency": {
             "type": "number",
             "source": "frequency"
           },
-
           "band": {
             "type": "string",
             "source": "band"
@@ -220,136 +213,108 @@
         }
       }
     },
-
     "clients": {
       "type": "array",
-
       "description": "Associated Wi-Fi stations discovered using iw station dump. SSID is resolved from the AP interface, IP and hostname are resolved from DHCP leases by client MAC.",
-
       "source": {
         "command": "leases=\"$(ubus call dhcp ipv4leases 2>/dev/null)\"; for iface in $(iw dev 2>/dev/null | awk '$1==\"Interface\"{print $2}'); do case \"$iface\" in mon*|*mon) continue;; esac; info=\"$(iw dev \"$iface\" info 2>/dev/null)\"; freq=\"$(printf '%s\\n' \"$info\" | awk '/^[[:space:]]*channel /{f=$3;gsub(/[()]/,\"\",f);print f;exit}')\"; [ -n \"$freq\" ] || continue; case \"$freq\" in *[!0-9]*) continue;; esac; if [ \"$freq\" -lt 3000 ]; then band=2g; elif [ \"$freq\" -lt 5925 ]; then band=5g; else band=6g; fi; ssid=\"$(printf '%s\\n' \"$info\" | awk '/^[[:space:]]*ssid /{sub(/^[[:space:]]*ssid /,\"\");print;exit}')\"; iw dev \"$iface\" station dump 2>/dev/null | awk -v iface=\"$iface\" -v band=\"$band\" -v ssid=\"$ssid\" -v leases=\"$leases\" 'function n(x){return (x ~ /^-?[0-9]+$/)?x:0} function rate(x){sub(/^[^:]*:[ \\t]*/,\"\",x);sub(/[ \\t].*$/, \"\", x);sub(/[^0-9.].*$/, \"\", x);return x} function esc(s){gsub(/\\\\/,\"\\\\\\\\\",s);gsub(/\"/,\"\\\\\\\"\",s);return s} function jsonget(idx,field,    cmd,v){cmd=\"printf %s \\\"\" leases \"\\\" | jsonfilter -q -e \\\"@.leases[\" idx \"].\" field \"\\\" 2>/dev/null\"; cmd | getline v; close(cmd); return v} function lookup(mac,    i,m,v){clientip=\"\";clienthost=\"\";for(i=0;i<128;i++){m=jsonget(i,\"macaddr\");if(m==\"\")break;if(tolower(m)==tolower(mac)){clientip=jsonget(i,\"ipaddr\");clienthost=jsonget(i,\"hostname\");break}} if(clientip==\"\"){cmd=\"ip neigh 2>/dev/null | awk \\047tolower($5)==tolower(\\\"\" mac \"\\\") && $1 ~ /^[0-9]+\\\\./ {print $1;exit}\\047\";cmd | getline v;close(cmd);clientip=v}} function emit(){if(mac!=\"\"){lookup(mac);printf \"{\\\"ap\\\":\\\"%s\\\",\\\"ssid\\\":\\\"%s\\\",\\\"ip\\\":\\\"%s\\\",\\\"hostname\\\":\\\"%s\\\",\\\"mac\\\":\\\"%s\\\",\\\"signal\\\":%d,\\\"signal_avg\\\":%d,\\\"connected\\\":%d,\\\"lastcommunication\\\":%d,\\\"idle\\\":%d,\\\"interface\\\":\\\"%s\\\",\\\"band\\\":\\\"%s\\\",\\\"rx\\\":%d,\\\"tx\\\":%d,\\\"rx_bytes\\\":%d,\\\"tx_bytes\\\":%d,\\\"rx_packets\\\":%d,\\\"tx_packets\\\":%d,\\\"tx_retries\\\":%d,\\\"tx_failed\\\":%d,\\\"rx_drop_misc\\\":%d,\\\"rxrate\\\":\\\"%sM\\\",\\\"txrate\\\":\\\"%sM\\\",\\\"expected_throughput\\\":\\\"%s\\\"}\\n\",iface,esc(ssid),esc(clientip),esc(clienthost),mac,signal,signalavg,connected,connected,idle,iface,band,rx,tx,rx,tx,rxpackets,txpackets,txretries,txfailed,rxdrop,rxrate,txrate,expected}} /^[[:space:]]*Station /{emit();mac=$2;signal=0;signalavg=0;rx=0;tx=0;rxpackets=0;txpackets=0;txretries=0;txfailed=0;rxdrop=0;rxrate=\"0\";txrate=\"0\";expected=\"\";connected=0;idle=0} $1==\"signal:\"{signal=n($2)} $1==\"signal\"&&$2==\"avg:\"{signalavg=n($3)} $1==\"rx\"&&$2==\"bytes:\"{rx=n($3)} $1==\"tx\"&&$2==\"bytes:\"{tx=n($3)} $1==\"rx\"&&$2==\"packets:\"{rxpackets=n($3)} $1==\"tx\"&&$2==\"packets:\"{txpackets=n($3)} $1==\"tx\"&&$2==\"retries:\"{txretries=n($3)} $1==\"tx\"&&$2==\"failed:\"{txfailed=n($3)} $1==\"rx\"&&$2==\"drop\"&&$3==\"misc:\"{rxdrop=n($4)} $1==\"rx\"&&$2==\"bitrate:\"{rxrate=rate($0)} $1==\"tx\"&&$2==\"bitrate:\"{txrate=rate($0)} $1==\"expected\"&&$2==\"throughput:\"{expected=$3} $1==\"connected\"&&$2==\"time:\"{connected=n($3)} $1==\"inactive\"&&$2==\"time:\"{idle=int(n($3)/1000)} END{emit()}' ; done",
         "format": "jsonl"
       },
-
       "item": {
         "type": "object",
-
         "fields": {
           "ap": {
             "type": "string",
             "source": "ap"
           },
-
           "ssid": {
             "type": "string",
             "source": "ssid"
           },
-
           "ip": {
             "type": "string",
             "source": "ip"
           },
-
           "hostname": {
             "type": "string",
             "source": "hostname"
           },
-
           "mac": {
             "type": "string",
             "source": "mac"
           },
-
           "signal": {
             "type": "number",
             "source": "signal"
           },
-
           "signal_avg": {
             "type": "number",
             "source": "signal_avg"
           },
-
           "connected": {
             "type": "number",
             "source": "connected"
           },
-
           "lastcommunication": {
             "type": "number",
             "source": "lastcommunication"
           },
-
           "idle": {
             "type": "number",
             "source": "idle"
           },
-
           "interface": {
             "type": "string",
             "source": "interface"
           },
-
           "band": {
             "type": "string",
             "source": "band"
           },
-
           "rx": {
             "type": "number",
             "source": "rx"
           },
-
           "tx": {
             "type": "number",
             "source": "tx"
           },
-
           "rx_bytes": {
             "type": "number",
             "source": "rx_bytes"
           },
-
           "tx_bytes": {
             "type": "number",
             "source": "tx_bytes"
           },
-
           "rx_packets": {
             "type": "number",
             "source": "rx_packets"
           },
-
           "tx_packets": {
             "type": "number",
             "source": "tx_packets"
           },
-
           "tx_retries": {
             "type": "number",
             "source": "tx_retries"
           },
-
           "tx_failed": {
             "type": "number",
             "source": "tx_failed"
           },
-
           "rx_drop_misc": {
             "type": "number",
             "source": "rx_drop_misc"
           },
-
           "rxrate": {
             "type": "string",
             "source": "rxrate"
           },
-
           "txrate": {
             "type": "string",
             "source": "txrate"
           },
-
           "expected_throughput": {
             "type": "string",
             "source": "expected_throughput"

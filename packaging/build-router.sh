@@ -54,6 +54,7 @@ chmod 755 "$STAGE/multivpn-connect/usr/bin/"* "$STAGE/multivpn-connect/usr/sbin/
 KEY_HASH=$(sha256sum "$OUT/keys/apcontroller-local.pem" | awk '{print $1}')
 sed "s/@KEY_HASH@/$KEY_HASH/g" "$SOURCE/packaging/install.sh.in" > "$OUT/install.sh"
 cp "$SOURCE/README.md" "$OUT/README.md"
+[ ! -d "$SOURCE/docs" ] || cp -a "$SOURCE/docs" "$OUT/"
 (cd "$OUT"; sha256sum "$ARCH/"*.apk "$ARCH/packages.adb" keys/apcontroller-local.pem install.sh > SHA256SUMS)
 chmod -R a+rX "$OUT"
 echo "Signed release: $OUT"

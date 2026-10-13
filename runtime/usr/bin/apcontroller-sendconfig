@@ -287,6 +287,7 @@ USEAS=$(uci -q get apcontroller."$SEC".useadditionalscript)
 #
 # Send configuration to hosts.
 #
+FAILED=0
 for HOST in $HOSTS; do
 
 	enabled=$(uci -q get apcontroller."$HOST".enabled)
@@ -362,7 +363,7 @@ for HOST in $HOSTS; do
 
 
 	# Only the OpenWrt writer is implemented; vendor placeholders must not report success.
-	if [ "$platform" != openwrt ]; then echo "$HOST ($ipaddr) [$platform]: POMINIETO - tylko odczyt, brak adaptera konfiguracji Wi-Fi"; continue; fi
+	if [ "$platform" != openwrt ]; then echo "$HOST ($ipaddr) [$platform]: POMINIETO - tylko odczyt, brak adaptera konfiguracji Wi-Fi"; FAILED=1; continue; fi
 
 	#
 	# SSH options.
@@ -784,6 +785,7 @@ for HOST in $HOSTS; do
 	#
 	# Verbose result.
 	#
+	[ "$T" -eq 0 ] || FAILED=1
 	if [ -n "$VERBOSE" ]; then
 
 		if [ "$T" -eq 0 ]; then
@@ -802,4 +804,4 @@ done
 
 rm -f "${BASEPATH}/cmds-${SEC}" 2>/dev/null
 
-exit 0
+exit "$FAILED"

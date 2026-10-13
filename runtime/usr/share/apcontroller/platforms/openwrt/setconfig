@@ -258,9 +258,8 @@ while json_is_a "$IDX" object; do
 	T=$(uci -q get network."$network")
 
 	if [ -z "$T" ]; then
-		IDX=$((IDX + 1))
-		json_select ..
-		continue
+		echo "Sieć $network nie istnieje na AP; wybierz istniejącą albo podaj VLAN do utworzenia" >&2
+		exit 2
 	fi
 
 

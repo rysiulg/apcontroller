@@ -101,7 +101,7 @@ return view.extend({
 			callAPController(),
 			L.resolveDefault(fs.read_direct(additionalScriptFile), ''),
 			uci.load('apcontroller'),
-			L.resolveDefault(uci.load('multivpn'),null),
+			L.resolveDefault(uci.load('network'),null),
 			Promise.resolve(null),
 			Promise.resolve(null)
 		]);
@@ -2479,7 +2479,13 @@ return view.extend({
 		};
 
 		o.default = 'lan';
+		const networkChoices=new Map();uci.sections('network','interface').filter(n=>n['.name']!=='loopback').forEach(n=>networkChoices.set(n['.name'],n['.name']+' — router ('+(n.proto||'?')+')'));
+		uci.sections('apcontroller','wifi').forEach(w=>{if(w.network&&!networkChoices.has(w.network))networkChoices.set(w.network,w.network+' — szablon Wi-Fi');});
+		(devicestatus.hosts||[]).filter(h=>h.platform==='openwrt'||h.type==='openwrt').forEach(h=>String(h.network_names||'').split(/\s+/).filter(Boolean).forEach(n=>{if(!networkChoices.has(n))networkChoices.set(n,n+' — AP '+(h.name||h.ipaddr));}));
+		for(const [name,label] of networkChoices)o.value(name,label);
+		o.description='Wybierz istniejącą sieć lub wpisz nową nazwę. To interfejs na docelowym AP, nie SSID. Nowa sieć wymaga VLAN-u albo przygotowania na AP. Zapis nie publikuje Wi-Fi; dopiero Zapisz i wyślij.';
 		o=s.taboption('wifi',form.Value,'vlan_id','VLAN na AP (opcjonalnie)','Przy wysyłaniu przygotuj interfejs bez adresu i tagowanie jak istniejący VLAN gościnny. Obsługiwany wykryty układ switch_guest/dev_guest na OpenWrt; inne układy wymagają dodatkowego skryptu. Nie zmienia VLAN-ów na głównym routerze.');o.datatype='range(2,4094)';o.modalonly=true;o.rmempty=true;
+		const vlanChoices=new Set();for(const type of ['device','switch_vlan','bridge-vlan'])uci.sections('network',type).forEach(n=>{const v=n.vid||(type!=='device'?n.vlan:null);if(Number(v)>=2&&Number(v)<=4094)vlanChoices.add(String(v));});uci.sections('apcontroller','wifi').forEach(w=>{if(w.vlan_id)vlanChoices.add(String(w.vlan_id));});(devicestatus.hosts||[]).forEach(h=>String(h.vlan_ids||'').split(/\s+/).filter(v=>Number(v)>=2&&Number(v)<=4094).forEach(v=>vlanChoices.add(v)));for(const vid of [...vlanChoices].sort((a,b)=>Number(a)-Number(b)))o.value(vid,'VLAN '+vid);o.description='Wybierz znany VLAN lub wpisz nowy (2–4094). Zapisz i wyślij utworzy sieć/VLAN tylko na zgodnych OpenWrt w rozpoznanym układzie portów; uplink i główny router muszą przenosić ten VLAN. Puste pole używa istniejącej sieci AP.';
 
 		o = s.taboption(
 			'wifi',
@@ -2534,7 +2540,7 @@ return view.extend({
 		const writableAP=id=>(uci.get('apcontroller',id,'platform')||(devicestatus.hosts||[]).find(h=>h.section===id)?.platform)==='openwrt';
 		uci.sections('apcontroller','host').filter(h=>writableAP(h['.name'])).forEach(h=>o.value(h['.name'],(h.name||h['.name'])+' ('+h.ipaddr+')'));
 		o.cfgvalue=function(id){return L.toArray(uci.get('apcontroller','map_'+id,'host'));};o.write=function(id,value){const group='map_'+id,targets=L.toArray(value).filter(Boolean);if(!targets.length){if(uci.get('apcontroller',group,'managed_wifi')===id)uci.remove('apcontroller',group);return;}if(!uci.get('apcontroller',group))uci.add('apcontroller','group',group);uci.set('apcontroller',group,'name','Wi-Fi: '+(uci.get('apcontroller',id,'name')||id));uci.set('apcontroller',group,'managed_wifi',id);uci.set('apcontroller',group,'host',targets);uci.set('apcontroller',group,'wifi',[id]);uci.set('apcontroller',group,'delete','0');uci.set('apcontroller',group,'useadditionalscript','0');};o.remove=function(id){this.write(id,[]);};
-		o=s.taboption('wifi',form.DummyValue,'_sendtargets','Wysyłanie do przypisanych AP');o.renderWidget=function(id){return E('button',{type:'button','class':'cbi-button',click:ui.createHandlerFn(this,async()=>{try{await m.save();await uci.save();await apcCommit('apcontroller');const r=await fs.exec('/usr/bin/apcontroller-sendconfig',['map_'+id,'verbose']);ui.showModal('Wynik wysyłania',[E('pre',{},r.stdout||r.stderr||'Brak przypisanych AP'),E('button',{type:'button','class':'cbi-button',click:ui.hideModal},'Zamknij')]);}catch(e){ui.addNotification(null,E('p',e.message),'error');}})},'Wyślij konfigurację Wi-Fi');};o.modalonly=true;
+		o=s.taboption('wifi',form.DummyValue,'_sendtargets','Wysyłanie do przypisanych AP');o.renderWidget=function(id){return E('button',{type:'button','class':'cbi-button',click:ui.createHandlerFn(this,async()=>{try{await m.save();await uci.save();await apcCommit('apcontroller');const r=await fs.exec('/usr/bin/apcontroller-sendconfig',['map_'+id,'verbose']);ui.showModal('Wynik wysyłania',[E('pre',{},r.stdout||r.stderr||'Brak przypisanych AP'),E('button',{type:'button','class':'cbi-button',click:ui.hideModal},'Zamknij')]);}catch(e){ui.addNotification(null,E('p',e.message),'error');}})},'Zapisz i wyślij konfigurację Wi-Fi');};o.modalonly=true;
 
 		/*
 		 * AP GROUP
