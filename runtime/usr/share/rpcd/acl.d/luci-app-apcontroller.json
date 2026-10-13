@@ -63,6 +63,12 @@
         ],
         "/usr/bin/apcontroller-authorize-key": [
           "exec"
+        ],
+        "/usr/bin/apcontroller-scan": [
+          "exec"
+        ],
+        "/usr/bin/apcontroller-scripts": [
+          "exec"
         ]
       },
       "ubus": {

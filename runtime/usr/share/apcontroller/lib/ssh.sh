@@ -41,6 +41,7 @@ apc_ssh_options()
 		"-o" "UserKnownHostsFile=/etc/apcontroller/known_hosts" \
 		"-p" "$port"
 
+	if [ "${APC_SSH_LEGACY:-0}" = 1 ]; then printf '%s\n' "-o" "KexAlgorithms=+diffie-hellman-group14-sha1" "-o" "PubkeyAcceptedAlgorithms=+ssh-rsa"; fi
 	if [ "$usekeyfile" = "1" ] && [ -n "$keyfile" ]; then
 
 		printf '%s\n' \

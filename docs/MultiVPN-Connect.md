@@ -7,3 +7,5 @@ Domyślnie lokalna sieć inicjuje ruch; dostęp odwrotny jest oddzielnym wyborem
 Start/stop/apply zapisują raport czasu, wyniku i stanu. Transport/SA nie gwarantuje osiągalności zdalnego LAN; sprawdź drogę powrotną i konkretny host. Certyfikaty, klucze i UCI wymagają prywatnego backupu niezależnie od formy APK.
 
 Ponowne Połącz zachowuje istniejący IKE/CHILD_SA przy niezmienionej konfiguracji. Zmiana konfiguracji IKE wymaga ponownego zestawienia tylko wybranego profilu. Interfejs XFRM musi być gotowy przed negocjacją. Odrzucenie duplikatu nie może usuwać działającej sesji.
+
+LuCI odświeża status co 5 sekund. Okno operacji pokazuje krótki wynik, a pełny log znajduje się pod Szczegóły i log. Poprawny zapis edycji zatwierdza własne UCI i zamyka okno; błędna walidacja pozostawia formularz do poprawienia.

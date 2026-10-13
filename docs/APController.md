@@ -18,3 +18,6 @@ Obecny zapis jest wdrożony dla OpenWrt. UniFi/airOS i Omada mają odczyt.
 ## Wskazówki dla kolejnego AI
 
 Nie zgaduj endpointów zapisu ani portów VLAN. Zachowaj konfigurację przed zmianą i sprawdź odczyt po wdrożeniu. Nie publikuj sekretów ani prywatnych logów. Podnieś wersję APK, zweryfikuj podpis i native apk update/policy. Nie nadpisuj wydanej wersji. Nie usuwaj konfiguracji z backupu razem z payloadem APK. Prywatne raporty środowiska są w osobnej paczce projektu poza WWW.
+
+## Skaner urządzeń
+Przycisk Skanuj urządzenia wybiera skonfigurowaną prywatną podsieć /22–/30 i wykonuje ograniczony skan ICMP (16 równoległych prób). Wyniki łączy z ARP routera, klientami Wi-Fi i tablicami ARP dostępnych OpenWrt/airOS/UniFi AP. Na AP z tcpdump krótko obserwuje lokalne ARP dla 169.254.0.0/16. Nie nadaje nowych IP ani nie zmienia DHCP/VLAN. Nie skanuje publicznych adresów ani całej przestrzeni link-local przez VPN. Cichego hosta 169.254 bez wpisu ARP i bez transmisji nie zawsze da się wykryć; „bez dzierżawy” może oznaczać adres statyczny. Wynik jest w prywatnym /etc/apcontroller/scanner i backupie konfiguracji.
