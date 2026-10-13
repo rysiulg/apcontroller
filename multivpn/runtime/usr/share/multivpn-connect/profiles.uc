@@ -16,6 +16,7 @@ cfg.foreach('multivpn','vpn',p=>{
     if(!identifier(id)||!identifier(p.interface)||!identifier(p.zone))err='Nieprawidłowa nazwa profilu, interfejsu lub strefy';
     else if(owned[id]&&owned[id].type!=p.type)err='Nie można zmienić typu istniejącego profilu; dodaj nowy profil';
     else if(!cidr(p.local_subnet)||!cidr(p.remote_subnet))err='Wymagane prawidłowe adresy sieci IPv4 z maską';
+    else if(p.mobile_access&&p.mobile_access!='0'&&p.mobile_access!='1')err='Nieprawidłowa opcja dostępu telefonu';
     else if(p.mode!='marm-only'&&p.mode!='both')err='Nieprawidłowy kierunek dostępu';
     else if(p.type=='existing'){
         let zone=null;cfg.foreach('firewall','zone',z=>{if(z.name==p.zone)zone=z;});if(cfg.get('network',p.interface)!='interface'||!zone)err='Nie znaleziono istniejącego interfejsu/strefy';else if(index(['sstp','wireguard','xfrm'],cfg.get('network',p.interface,'proto'))<0)err='Istniejący profil musi wskazywać interfejs VPN, nie WAN ani LAN';else if(index(type(zone.network)=='array'?zone.network:split(zone.network||'',' '),p.interface)<0)err='Wybrana strefa nie zawiera interfejsu VPN';

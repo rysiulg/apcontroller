@@ -15,6 +15,7 @@ case "${PLUTO_VERB:-}" in
         ip route replace "$remote" dev "$iface"
         nft delete table ip "$table" 2>/dev/null || true
         umask 077; printf '{"mode":"site-to-site","updated":%s}\n' "$(date +%s)" > "$state"
+        /usr/bin/multivpn-mobile
         logger -t multivpn-connect "IKE site-to-site $id connected"
         exit 0
     fi
@@ -31,6 +32,7 @@ table ip $table {
 EOF
     umask 077
     printf '{"vip":"%s","updated":%s}\n' "$vip" "$(date +%s)" > "$state"
+    /usr/bin/multivpn-mobile
     /usr/bin/multivpn-gateway
     logger -t apcontroller-vpn "IKE profile $id connected"
     ;;
@@ -38,6 +40,7 @@ EOF
     ip route del "$remote" dev "$iface" 2>/dev/null || true
     nft delete table ip "$table" 2>/dev/null || true
     rm -f "$state"
+    /usr/bin/multivpn-mobile
     /usr/bin/multivpn-gateway
     logger -t apcontroller-vpn "IKE profile $id disconnected"
     ;;

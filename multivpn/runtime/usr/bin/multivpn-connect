@@ -25,7 +25,7 @@ if [ -z "$selected" ] && [ -s /etc/multivpn-connect/vpn-managed ]; then
             rm -f "/etc/swanctl/conf.d/apc-$oldid.conf" "/tmp/apcontroller-vpn-$oldid.json"
             nft delete table ip "apcvpn_$oldid" 2>/dev/null || true
         fi
-        for suffix in out in router; do uci -q delete "firewall.apcvpn_${oldid}_$suffix" || true; done
+        for suffix in out in router mobile; do uci -q delete "firewall.apcvpn_${oldid}_$suffix" || true; done
         uci -q delete "network.apcvpn_${oldid}_route" || true
     done < /etc/multivpn-connect/vpn-managed
 fi
@@ -131,11 +131,20 @@ EOF
         # Replace the earlier Zacisze direction controls with the named profile rules.
         if [ "$id" = zacisze ]; then uci set firewall.zacisze_to_lan.enabled=0; uci set firewall.zacisze_input.enabled=0; fi
     fi
+    field mobile mobile_access 1
+    mobilezone=$(ucode /usr/share/multivpn-connect/mobile.uc zone)
+    mobilenets=$(ucode /usr/share/multivpn-connect/mobile.uc networks)
+    uci -q delete "firewall.apcvpn_${id}_mobile" || true
+    if [ "$mobile" = 1 ] && [ -n "$mobilenets" ]; then
+        uci set "firewall.apcvpn_${id}_mobile=rule"; uci set "firewall.apcvpn_${id}_mobile.name=VPN $id phone to remote"; uci set "firewall.apcvpn_${id}_mobile.src=$mobilezone"; uci set "firewall.apcvpn_${id}_mobile.dest=$zone"; uci set "firewall.apcvpn_${id}_mobile.dest_ip=$remotenet"; uci set "firewall.apcvpn_${id}_mobile.proto=all"; uci set "firewall.apcvpn_${id}_mobile.target=ACCEPT"
+        for net in $mobilenets; do uci add_list "firewall.apcvpn_${id}_mobile.src_ip=$net"; done
+    fi
     uci set "firewall.apcvpn_${id}_out=rule"; uci set "firewall.apcvpn_${id}_out.name=VPN $id MARM to remote"; uci set "firewall.apcvpn_${id}_out.src=$localzone"; uci set "firewall.apcvpn_${id}_out.dest=$zone"; uci set "firewall.apcvpn_${id}_out.src_ip=$localnet"; uci set "firewall.apcvpn_${id}_out.dest_ip=$firewallremote"; uci set "firewall.apcvpn_${id}_out.proto=all"; uci set "firewall.apcvpn_${id}_out.target=ACCEPT"
     uci set "firewall.apcvpn_${id}_in=rule"; uci set "firewall.apcvpn_${id}_in.name=VPN $id remote to MARM"; uci set "firewall.apcvpn_${id}_in.src=$zone"; uci set "firewall.apcvpn_${id}_in.dest=$localzone"; uci set "firewall.apcvpn_${id}_in.src_ip=$remotenet"; uci set "firewall.apcvpn_${id}_in.dest_ip=$localnet"; uci set "firewall.apcvpn_${id}_in.proto=all"; uci set "firewall.apcvpn_${id}_in.target=ACCEPT"; uci set "firewall.apcvpn_${id}_in.enabled=$reverse"
     uci set "firewall.apcvpn_${id}_router=rule"; uci set "firewall.apcvpn_${id}_router.name=VPN $id remote to router"; uci set "firewall.apcvpn_${id}_router.src=$zone"; uci set "firewall.apcvpn_${id}_router.src_ip=$remotenet"; uci set "firewall.apcvpn_${id}_router.dest_ip=$localnet"; uci set "firewall.apcvpn_${id}_router.proto=all"; uci set "firewall.apcvpn_${id}_router.target=ACCEPT"; uci set "firewall.apcvpn_${id}_router.enabled=$reverse"
 }
 config_foreach apply_profile vpn
+/usr/bin/multivpn-ike-server
 uci commit multivpn; uci commit network
 fw4 check >/dev/null
 uci commit firewall
@@ -161,7 +170,7 @@ for id in $(jsonfilter -i "$tmp" -e '@[*].id'); do
         fi
         # --file in conf.d changes the credential base directory; load from the main config.
         timeout -k 2 10 swanctl --load-creds --noprompt >/dev/null
-        timeout -k 2 10 swanctl --load-conns --file "/etc/swanctl/conf.d/apc-$id.conf" >/dev/null
+        timeout -k 2 10 swanctl --load-conns --file /etc/swanctl/swanctl.conf >/dev/null
         if [ "$action" = start ]; then
             if timeout -k 2 22 swanctl --initiate --ike "apc-$id" --child "apc-$id-lan" --timeout 20; then :; else
                 result=$?
@@ -176,8 +185,10 @@ for id in $(jsonfilter -i "$tmp" -e '@[*].id'); do
     fi
     if [ "$action" = start ] && [ "$type" != ikev2 ]; then ifup "$iface"; fi
 done
+if [ ! -d /sys/module/crypto_safexcel ]; then timeout -k 2 10 swanctl --load-conns --file /etc/swanctl/swanctl.conf >/dev/null; fi
 mkdir -p /etc/multivpn-connect
 ucode -e 'import {cursor} from "uci"; let c=cursor();c.foreach("multivpn","vpn",p=>printf("%s %s %s %s\n",p[".name"],p.type,p.interface,p.zone));' > /etc/multivpn-connect/vpn-managed.next
 mv /etc/multivpn-connect/vpn-managed.next /etc/multivpn-connect/vpn-managed
 /usr/bin/multivpn-gateway
+/usr/bin/multivpn-mobile
 echo 'Profile VPN zapisane; kierunki firewalla zastosowane.'

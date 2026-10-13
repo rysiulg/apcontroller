@@ -1,0 +1,15 @@
+#!/bin/sh
+# Integracja istniejącego serwera MARM; plik common.conf jest prywatną konfiguracją.
+set -e
+umask 077
+file=/etc/swanctl/common.conf
+[ -f "$file" ] || exit 0
+grep -q 'ikev2clients' "$file" && grep -q 'if_id_in = 3' "$file" || exit 0
+base=/etc/multivpn-connect/ike-server-local-ts.base
+mkdir -p /etc/multivpn-connect
+if [ ! -s "$base" ]; then sed -n 's/^[[:space:]]*local_ts[[:space:]]*=[[:space:]]*//p' "$file" > "$base"; fi
+[ "$(wc -l < "$base")" = 1 ] || { echo 'Serwer IKE: niejednoznaczne lokalne selektory'; exit 2; }
+extra=$(ucode -e 'import {cursor} from "uci";let c=cursor(),a=[];c.foreach("multivpn","vpn",p=>{if(p.mobile_access!="0"&&index(a,p.remote_subnet)<0)push(a,p.remote_subnet);});print(join(",",a));')
+ts=$(cat "$base"); [ -z "$extra" ] || ts="$ts,$extra"
+sed "s|^[[:space:]]*local_ts[[:space:]]*=.*|        local_ts = $ts|" "$file" > "$file.next"
+if cmp -s "$file" "$file.next"; then rm "$file.next"; else cp -p "$file" /etc/multivpn-connect/ike-server-common.previous; chmod 600 "$file.next"; mv "$file.next" "$file"; fi
