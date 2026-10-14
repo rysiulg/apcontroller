@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+umask 077
+. /usr/share/libubox/jshn.sh
+json_load_file "$1";json_get_var name hostname;json_get_var hash root_hash
+mkdir -p /etc/apcontroller/pull/initial
+for cfg in /etc/config/system /etc/shadow; do file=${cfg##*/};[ -f /etc/apcontroller/pull/initial/$file ] || cp -p "$cfg" /etc/apcontroller/pull/initial/$file;done
+if [ -n "$name" ]; then
+ printf '%s' "$name" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$' || exit 2
+ if [ "$(uci -q get system.@system[0].hostname)" != "$name" ]; then uci set "system.@system[0].hostname=$name";uci commit system;printf '%s\n' "$name" > /proc/sys/kernel/hostname;fi
+fi
+if [ -n "$hash" ]; then
+ printf '%s' "$hash" | grep -Eq '^\$[156]\$[A-Za-z0-9$./]+$' || exit 2
+ current=$(awk -F: '$1=="root" {print $2}' /etc/shadow)
+ if [ "$current" != "$hash" ]; then
+  awk -F: -v OFS=: -v hash="$hash" '$1=="root" {$2=hash} {print}' /etc/shadow > /etc/shadow.apcontroller-next
+  chmod 600 /etc/shadow.apcontroller-next;mv /etc/shadow.apcontroller-next /etc/shadow
+ fi
+fi
+for path in /etc/config/system /etc/shadow /etc/apcontroller/; do grep -qxF "$path" /etc/sysupgrade.conf || echo "$path" >> /etc/sysupgrade.conf;done

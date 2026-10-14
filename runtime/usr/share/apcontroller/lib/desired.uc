@@ -16,15 +16,18 @@ for(let h in hosts){
  let id=h['.name'];if(h.enabled!='1'||h.platform!='openwrt'||h.pull_sync!='1'||(length(selected)&&index(selected,id)<0))continue;if(!match(id,/^[A-Za-z0-9_]+$/))die('Nieprawidłowy identyfikator AP');
  let wifi={},script=false;
  for(let g in groups){if(index(arr(g.host),id)<0)continue;for(let wid in arr(g.wifi)){let w=c.get_all('apcontroller',wid);if(!w||w['.type']!='wifi')continue;if(!match(wid,/^[A-Za-z0-9_]+$/))die('Nieprawidłowy identyfikator Wi-Fi');let extra=g.useadditionalscript=='1';script=script||extra;
-  for(let band in arr(w.band)){let key=wid+':'+band,v={id:wid,band:band,network:w.network||'lan',vlan_id:(w.vlan_auto??'1')=='1'?network_vlan(w.network||'lan'):(w.vlan_id||''),ssid:w.ssid||'',encryption:w.encryption||'none',key:w.key||'',enabled:int(w.enabled??'1'),hidden:int(w.hidden||'0'),isolate:int(w.isolate||'0'),macfilter:w.macfilter||'disable',maclist:arr(w.maclist),use_as:extra?1:0};if(wifi[key]?.use_as)v.use_as=1;wifi[key]=v;}
+  for(let band in arr(w.band)){let key=wid+':'+band,v={id:wid,band:band,network:w.network||'lan',vlan_id:(w.vlan_auto??'1')=='1'?network_vlan(w.network||'lan'):(w.vlan_id||''),ssid:w.ssid||'',encryption:w.encryption||'none',key:w.key||'',enabled:int(w.enabled??'1'),hidden:int(w.hidden||'0'),isolate:int(w.isolate||'0'),macfilter:w.macfilter||'disable',maclist:arr(w.maclist),use_as:extra?1:0};for(let option in ['ieee80211r','ieee80211k','rrm_neighbor_report','rrm_beacon_report','bss_transition','ft_over_ds','ft_psk_generate_local','mobility_domain'])if(w[option]!=null)v[option]=w[option];if(wifi[key]?.use_as)v.use_as=1;wifi[key]=v;}
  }}
  let definitions=[];for(let key in sort(keys(wifi)))push(definitions,wifi[key]);let seen={};for(let w in definitions){let collision=w.ssid+':'+w.band;if(seen[collision])die('Dwa szablony tego samego SSID/pasma dla '+id);seen[collision]=true;}
- push(jobs,{id:id,wifis:definitions,script:script,adopt:adoption[id]||[]});
+ push(jobs,{id:id,wifis:definitions,script:script,adopt:adoption[id]||[],full_sync:h.pull_full_sync=='1',hostname:h.sync_hostname=='0'?'':(h.managed_hostname||h.name||''),sync_root:h.sync_root_password=='1'&&h.key_verified=='1'});
 }
 for(let j in jobs){
  let dir=base+'/'+j.id;mkdir(dir,0700);let stage=dir+'/stage';mkdir(stage,0700);
- let fields=['payload','setconfig','vlan.sh','apply.sh'];
- writefile(stage+'/payload',sprintf('%J\n',{delete:0,managed_only:1,wifis:j.wifis,adopt:j.adopt}));
+ let fields=['payload','setconfig','vlan.sh','apply.sh','identity.json','identity.sh'];
+ writefile(stage+'/payload',sprintf('%J\n',{delete:0,managed_only:1,full_sync:j.full_sync?1:0,wifis:j.wifis,adopt:j.adopt}));
+ let hostname=replace(j.hostname,/[^A-Za-z0-9-]/g,'-');hostname=substr(replace(hostname,/^-+|-+$/g,''),0,63);
+ let root_hash='';if(j.sync_root){let m=null;for(let line in split(readfile('/etc/shadow')||'','\n'))if(substr(line,0,5)=='root:')m=match(line,/^root:([^:]+):/);if(!m||!match(m[1],/^\$[156]\$[A-Za-z0-9$.\/]+$/))die('Hasło root głównego wymaga obsługiwanego hasha crypt');root_hash=m[1];}
+ writefile(stage+'/identity.json',sprintf('%J\n',{hostname:hostname,root_hash:root_hash}));writefile(stage+'/identity.sh',readfile('/usr/share/apcontroller/device-identity'));
  writefile(stage+'/setconfig',readfile('/usr/share/apcontroller/platforms/openwrt/setconfig'));
  writefile(stage+'/vlan.sh',readfile('/usr/share/apcontroller/lib/network-vlan.sh'));
  writefile(stage+'/apply.sh','#!/bin/sh\nset -e\ncd "$(dirname "$0")"\nAPC_PREFLIGHT=1 sh ./setconfig ./payload\nsh ./setconfig ./payload\n');

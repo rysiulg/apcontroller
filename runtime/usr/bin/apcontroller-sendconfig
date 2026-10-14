@@ -29,6 +29,7 @@ for WIFI in $WIFIS; do
  for BAND in $(uci -q get "apcontroller.$WIFI.band"); do
   json_add_object;json_add_string network "$NETWORK";json_add_string vlan_id "$VLAN"
   for option in ssid encryption key macfilter; do value=$(uci -q get "apcontroller.$WIFI.$option" || true);json_add_string "$option" "$value";done
+  for option in ieee80211r ieee80211k rrm_neighbor_report rrm_beacon_report bss_transition ft_over_ds ft_psk_generate_local mobility_domain; do value=$(uci -q get "apcontroller.$WIFI.$option" || true);[ -z "$value" ] || json_add_string "$option" "$value";done
   for option in enabled hidden isolate; do value=$(uci -q get "apcontroller.$WIFI.$option" || echo 0);json_add_int "$option" "$value";done
   json_add_string band "$BAND";json_add_array maclist
   for mac in $(uci -q get "apcontroller.$WIFI.maclist" || true); do json_add_string '' "$mac";done

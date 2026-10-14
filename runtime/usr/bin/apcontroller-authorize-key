@@ -1,5 +1,6 @@
 #!/bin/sh
 set -e
+[ "${2:-}" != auto ] || exec /usr/bin/apcontroller-key-enroll "${1:-}"
 id=${1:-}; case "$id" in ''|*[!a-zA-Z0-9_]*) echo 'Nieprawidlowy identyfikator AP' >&2; exit 2;; esac
 [ "$(uci -q get apcontroller.$id)" = host ] || exit 2
 APC_STANDALONE=1

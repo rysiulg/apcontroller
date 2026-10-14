@@ -31,6 +31,14 @@ wait
 find "$tmp/alive" -type f -exec cat '{}' ';' > "$dir/alive.txt"
 ubus call apcontroller status > "$dir/status.json"
 { cat /proc/net/arp; ip -4 neigh show; } | sed 's/^/router /' > "$dir/neighbors.txt"
+# APIPA is link-local, not routed: listen on the local LAN as well as on remote APs.
+if command -v tcpdump >/dev/null; then
+ iface=$(uci -q get network.lan.device || uci -q get network.lan.ifname)
+ case "$iface" in ''|*[!a-zA-Z0-9_.:-]*) ;;*)
+ tcpdump -l -nne -c 256 -i "$iface" 'arp or (ip and net 169.254.0.0/16)' > "$tmp/local-fallback" 2>/dev/null & listener=$!
+ sleep 8;kill "$listener" 2>/dev/null || true;wait "$listener" 2>/dev/null || true
+ sed 's/^/router /' "$tmp/local-fallback" >> "$dir/neighbors.txt";;esac
+fi
 APC_STANDALONE=1
 . /usr/share/apcontroller/lib/ssh.sh
 . /lib/functions.sh
@@ -43,7 +51,7 @@ collect_ap(){
  [ -n "$platform" ] || platform=$(cat "$path/$ip-$id.platform" 2>/dev/null || true)
  case "$platform" in openwrt|ubiquiti) ;; *) return 0;; esac
  config_get port "$id" port 22; config_get username "$id" username; config_get password "$id" password; config_get key "$id" keyfile; config_get use "$id" usekeyfile 0
- ( [ "$platform" != ubiquiti ] || APC_SSH_LEGACY=1; apc_ssh_exec "$ip" "$port" "$username" "$password" "$key" "$use" 'cat /proc/net/arp; ip -4 neigh show 2>/dev/null; iface=br0; [ ! -f /etc/openwrt_release ] || iface=$(uci -q get network.lan.device || uci -q get network.lan.ifname); case "$iface" in ""|*[!a-zA-Z0-9_.:-]*) exit 0;; esac; if command -v tcpdump >/dev/null; then tcpdump -l -nne -i "$iface" "arp and net 169.254.0.0/16" 2>/dev/null & p=$!; sleep 6; kill $p 2>/dev/null; wait $p 2>/dev/null || true; fi' > "$tmp/$id.raw" 2>"$tmp/$id.error" || true; sed "s/^/$ip /" "$tmp/$id.raw" > "$tmp/$id.neighbors") &
+ ( [ "$platform" != ubiquiti ] || APC_SSH_LEGACY=1; apc_ssh_exec "$ip" "$port" "$username" "$password" "$key" "$use" 'cat /proc/net/arp; ip -4 neigh show 2>/dev/null; iface=br0; [ ! -f /etc/openwrt_release ] || iface=$(uci -q get network.lan.device || uci -q get network.lan.ifname); case "$iface" in ""|*[!a-zA-Z0-9_.:-]*) exit 0;; esac; if command -v tcpdump >/dev/null; then tcpdump -l -nne -c 256 -i "$iface" "arp or (ip and net 169.254.0.0/16)" 2>/dev/null & p=$!; sleep 8; kill $p 2>/dev/null; wait $p 2>/dev/null || true; fi' > "$tmp/$id.raw" 2>"$tmp/$id.error" || true; sed "s/^/$ip /" "$tmp/$id.raw" > "$tmp/$id.neighbors") &
  count=$((count+1)); [ "$((count%4))" != 0 ] || wait
 }
 config_foreach collect_ap host

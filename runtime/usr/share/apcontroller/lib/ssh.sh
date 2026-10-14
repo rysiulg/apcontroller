@@ -45,7 +45,7 @@ apc_ssh_options()
 	if [ "$usekeyfile" = "1" ] && [ -n "$keyfile" ]; then
 
 		printf '%s\n' \
-			"-i" "$keyfile"
+			"-o" "BatchMode=yes" "-o" "IdentitiesOnly=yes" "-i" "$keyfile"
 
 	fi
 }

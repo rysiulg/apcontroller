@@ -33,6 +33,16 @@ enroll_host(){
  [ -s /etc/apcontroller/desired/$id/current.tar ] || return 0
  [ "$user" = root ] || { echo "$id: pobieranie wymaga przygotowania klienta z uprawnieniami root";return 0; }
  if ! version_old=$(rexec 'test -f /etc/openwrt_release; cat /etc/apcontroller/pull/agent-version 2>/dev/null || true'); then echo "$id ($ip): niedostÄ™pny, przygotowanie zostanie ponowione";return 0;fi
+ mode=$(uci -q get "apcontroller.$id.ssh_auth_mode" || echo auto)
+ if [ "$mode" != password ]; then
+  /usr/bin/apcontroller-key-enroll "$id" || { echo "$id: nie potwierdzono logowania kluczem";return 0; }
+  key=$(uci -q get "apcontroller.$id.keyfile");use=1;pass=''
+ fi
+ mkdir -p "/etc/apcontroller/inventory/$id"
+ for cfg in wireless network system; do
+  [ -f "/etc/apcontroller/inventory/$id/$cfg" ] || { rexec "cat /etc/config/$cfg" > "/etc/apcontroller/inventory/$id/$cfg.next" && mv "/etc/apcontroller/inventory/$id/$cfg.next" "/etc/apcontroller/inventory/$id/$cfg"; }
+ done
+ rexec 'set -e; umask 077; mkdir -p /etc/apcontroller/pull/initial; for cfg in wireless network system; do test -f /etc/apcontroller/pull/initial/$cfg || cp -p /etc/config/$cfg /etc/apcontroller/pull/initial/$cfg;done' || return 0
  if [ "$version_old" != "$version" ]; then
   rexec 'set -e; test -f /etc/openwrt_release; command -v dbclient >/dev/null; command -v dropbearkey >/dev/null; mkdir -p /etc/apcontroller/pull /etc/apcontroller/legacy-backup/r21 /root/.ssh /scripts; chmod 700 /etc/apcontroller/pull; if [ ! -f /etc/apcontroller/pull/client.key ]; then dropbearkey -t rsa -s 2048 -f /etc/apcontroller/pull/client.key >/dev/null 2>&1;fi; chmod 600 /etc/apcontroller/pull/client.key; test -f /etc/apcontroller/legacy-backup/r21/crontab || cp /etc/crontabs/root /etc/apcontroller/legacy-backup/r21/crontab' || return 0
   rput /usr/bin/apcontroller-pull.next /usr/share/apcontroller/pull-agent || return 0

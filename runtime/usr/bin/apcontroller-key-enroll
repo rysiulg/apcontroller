@@ -1,0 +1,23 @@
+#!/bin/sh
+set -e
+umask 077
+id=${1:-};case "$id" in ''|*[!a-zA-Z0-9_]*) exit 2;;esac
+[ "$(uci -q get apcontroller.$id.platform)" = openwrt ] || exit 2
+. /usr/share/apcontroller/lib/ssh.sh
+ip=$(uci -q get apcontroller.$id.ipaddr);user=$(uci -q get apcontroller.$id.username);port=$(uci -q get apcontroller.$id.port || echo 22)
+[ "$user" = root ] || exit 2
+pass=$(uci -q get apcontroller.$id.password || true);oldkey=$(uci -q get apcontroller.$id.keyfile || true);use=$(uci -q get apcontroller.$id.usekeyfile || echo 0)
+if [ "$(uci -q get apcontroller.$id.pull_setup_credentials || true)" = 1 ] && [ "$use" != 1 ]; then pass=$(uci -q get apcontroller.$id.pull_password);fi
+key=/etc/apcontroller/ssh/controller_ed25519
+mkdir -p /etc/apcontroller/ssh;chmod 700 /etc/apcontroller/ssh
+exec 7>/tmp/apcontroller-keygen.lock;flock 7
+if [ ! -s "$key" ]; then ssh-keygen -q -t ed25519 -N '' -C apcontroller-controller -f "$key";fi
+chmod 600 "$key";pub=$(ssh-keygen -y -f "$key")
+if ! apc_ssh_exec "$ip" "$port" "$user" '' "$key" 1 'test -f /etc/openwrt_release' >/dev/null 2>&1; then
+ command='set -e; test -f /etc/openwrt_release; umask 077; mkdir -p /etc/dropbear /etc/apcontroller/pull/initial; touch /etc/dropbear/authorized_keys; test -f /etc/apcontroller/pull/initial/authorized_keys || cp -p /etc/dropbear/authorized_keys /etc/apcontroller/pull/initial/authorized_keys; IFS= read -r pub; marker=apcontroller-controller; file=/etc/dropbear/authorized_keys; awk -v marker="$marker" '\''$NF != marker'\'' "$file" > "$file.apc-next"; printf '\''no-port-forwarding,no-agent-forwarding,no-X11-forwarding %s %s\n'\'' "$pub" "$marker" >> "$file.apc-next"; chmod 600 "$file.apc-next"; mv "$file.apc-next" "$file"; grep -qxF /etc/dropbear/authorized_keys /etc/sysupgrade.conf || echo /etc/dropbear/authorized_keys >> /etc/sysupgrade.conf'
+ printf '%s\n' "$pub" | apc_ssh_pipe "$ip" "$port" "$user" "$pass" "$oldkey" "$use" "$command"
+fi
+apc_ssh_exec "$ip" "$port" "$user" '' "$key" 1 'test -f /etc/openwrt_release' >/dev/null
+uci set "apcontroller.$id.keyfile=$key";uci set "apcontroller.$id.usekeyfile=1";uci set "apcontroller.$id.key_verified=1";uci commit apcontroller
+for path in /etc/apcontroller/ /etc/config/apcontroller; do grep -qxF "$path" /etc/sysupgrade.conf || echo "$path" >> /etc/sysupgrade.conf;done
+echo "$id: klucz wygenerowany/zainstalowany, logowanie sprawdzone; kontroler używa klucza"

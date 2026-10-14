@@ -21,11 +21,12 @@ trap 'exit 143' TERM HUP INT
 code=0;wait "$connection" || code=$?;kill "$watchdog" 2>/dev/null || true;wait "$watchdog" 2>/dev/null || true
 [ "$code" = 0 ] || { cat "$work/ssh.log" >&2;exit 1; }
 tar -tf "$work/bundle.tar" > "$work/files"
-while IFS= read -r name; do case "$name" in payload|setconfig|vlan.sh|apply.sh|REVISION|apcontroller.user|apcontroller-agent-as) ;;*) echo 'Nieprawidłowy plik w paczce konfiguracji' >&2;exit 2;;esac;done < "$work/files"
+while IFS= read -r name; do case "$name" in payload|setconfig|vlan.sh|apply.sh|REVISION|identity.json|identity.sh|apcontroller.user|apcontroller-agent-as) ;;*) echo 'Nieprawidłowy plik w paczce konfiguracji' >&2;exit 2;;esac;done < "$work/files"
 tar -xf "$work/bundle.tar" -C "$work"
 revision=$(cat "$work/REVISION")
 printf '%s' "$revision" | grep -Eq '^[a-f0-9]{64}$' || exit 2
 fields='payload setconfig vlan.sh apply.sh'
+[ ! -f "$work/identity.json" ] || fields="$fields identity.json identity.sh"
 [ ! -f "$work/apcontroller.user" ] || fields="$fields apcontroller.user apcontroller-agent-as"
 actual=$(cd "$work";sha256sum $fields | sha256sum | cut -d ' ' -f1)
 [ "$actual" = "$revision" ] || { echo 'Nieprawidłowa suma konfiguracji' >&2;exit 2; }
@@ -40,6 +41,15 @@ if ! sh "$work/apply.sh"; then
  /etc/init.d/network reload || true;wifi reload || true
  echo 'Nie zastosowano nowej wersji; przywrócono network/wireless' >&2;exit 1
 fi
+# Keep the wired management path working before changing credentials or accepting the revision.
+reachable=0
+for attempt in 1 2 3 4 5 6 7 8 9 10; do ping -c 1 -W 2 "$MAIN" >/dev/null 2>&1 && { reachable=1;break; };sleep 2;done
+if [ "$reachable" != 1 ]; then
+ cp "$state/before-apply/network" /etc/config/network;cp "$state/before-apply/wireless" /etc/config/wireless
+ /etc/init.d/network reload || true;wifi reload || true
+ echo 'Brak potwierdzenia dostępu do kontrolera; przywrócono konfigurację' >&2;exit 1
+fi
+[ ! -f "$work/identity.json" ] || sh "$work/identity.sh" "$work/identity.json"
 printf '%s\n' "$revision" > "$state/applied.next";mv "$state/applied.next" "$state/applied"
 touch "$state/migrated"
 logger -t apcontroller-pull "Zastosowano konfigurację ${revision%????????????????????????????????????????????????????}"

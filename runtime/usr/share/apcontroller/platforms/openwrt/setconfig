@@ -106,6 +106,14 @@ wifi_set_macfilter() {
 }
 
 
+wifi_roaming(){
+ local sec="$1" option value
+ for option in ieee80211r ieee80211k rrm_neighbor_report rrm_beacon_report bss_transition ft_over_ds ft_psk_generate_local mobility_domain; do
+  json_get_var value "$option"
+  if [ -n "$value" ]; then uci set "wireless.$sec.$option=$value";else uci -q delete "wireless.$sec.$option" || true;fi
+ done
+}
+
 wifi_add() {
 	local RADIO="$1"
 	local NETWORK="$2"
@@ -146,6 +154,7 @@ wifi_add() {
 	fi
 
 	wifi_set_macfilter "$SEC" "$MACFILTER" "$MACLIST"
+	wifi_roaming "$SEC"
 	if [ -n "$WIFI_ID" ]; then uci set wireless."$SEC".apcontroller="$WIFI_ID";uci set wireless."$SEC".apcontroller_band="$BAND";fi
 }
 
@@ -178,12 +187,14 @@ wifi_update() {
 	uci set wireless."$SEC".isolate="${ISOLATE:-0}"
 
 	wifi_set_macfilter "$SEC" "$MACFILTER" "$MACLIST"
+	wifi_roaming "$SEC"
 	if [ -n "$WIFI_ID" ]; then uci set wireless."$SEC".apcontroller="$WIFI_ID";uci set wireless."$SEC".apcontroller_band="$BAND";fi
 }
 
 
 json_load_file "$FILE" || exit 2
 json_get_var managed_only managed_only
+json_get_var full_sync full_sync
 WANTED=""
 
 json_is_a wifis array || exit 2
@@ -200,6 +211,9 @@ preflight_wifi(){
   case "$band" in 2g|5g|6g) ;; *) echo 'Nieprawidłowe pasmo' >&2;return 2;; esac
   case "$encryption" in none) ;; psk2|psk2+ccmp|sae|sae-mixed|psk-mixed|psk-mixed+ccmp)
    [ "${#key}" -ge 8 ] && [ "${#key}" -le 63 ] || { echo 'Hasło WPA musi mieć 8–63 znaki' >&2;return 2; };; *) echo 'Nieobsługiwane szyfrowanie w adapterze' >&2;return 2;; esac
+  json_get_var roam ieee80211r;json_get_var domain mobility_domain
+  case "$roam" in ''|0) ;;1) case "$encryption" in psk2|psk2+ccmp) ;;*) echo '802.11r wymaga WPA2-PSK w tym adapterze' >&2;return 2;;esac;printf '%s' "$domain" | grep -Eq '^[a-fA-F0-9]{4}$' || return 2;;*) return 2;;esac
+  for option in ieee80211k rrm_neighbor_report rrm_beacon_report bss_transition ft_over_ds ft_psk_generate_local; do json_get_var value "$option";case "$value" in ''|0|1) ;;*) return 2;;esac;done
   wifi_ensure_vlan "$network" "$vlan_id" || return 2
   [ -n "$vlan_id" ] || [ "$(uci -q get "network.$network")" = interface ] || { echo "Sieć $network nie istnieje na AP i nie podano VLAN-u" >&2;return 2; }
   case "$band" in 2g) pattern="\.band='2g'|\.hwmode='11g'";;5g) pattern="\.band='5g'|\.hwmode='11a'";;6g) pattern="\.band='6g'";;esac
@@ -463,7 +477,11 @@ if [ "$managed_only" = 1 ]; then
  SEEN=''
  for section in $(uci -q show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
   [ "$(uci -q get "wireless.$section.mode")" = ap ] || continue
-  owner=$(uci -q get "wireless.$section.apcontroller");[ -n "$owner" ] || continue
+  owner=$(uci -q get "wireless.$section.apcontroller")
+  if [ -z "$owner" ]; then
+   [ "$full_sync" != 1 ] || { uci delete "wireless.$section";NEEDCOMMIT=1;echo "APC: usunięto nieprzypisaną sieć AP $section (pełna synchronizacja)"; }
+   continue
+  fi
   identity=$owner:$(uci -q get "wireless.$section.apcontroller_band")
   duplicate=$identity:$(uci -q get "wireless.$section.device")
   case " $WANTED " in *" $identity "*) case " $SEEN " in *" $duplicate "*) uci delete "wireless.$section";NEEDCOMMIT=1;echo "APC: usunięto duplikat zarządzanej sekcji $section";;*) SEEN="$SEEN $duplicate";;esac;;*) uci delete "wireless.$section";NEEDCOMMIT=1;echo "APC: usunięto zarządzaną sekcję $section ($identity)";;esac

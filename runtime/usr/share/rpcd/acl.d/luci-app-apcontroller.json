@@ -78,6 +78,9 @@
         ],
         "/usr/bin/apcontroller-desired": [
           "exec"
+        ],
+        "/usr/bin/apcontroller-inventory": [
+          "exec"
         ]
       },
       "ubus": {
