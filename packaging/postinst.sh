@@ -6,6 +6,11 @@ case "$interval" in ''|*[!0-9]*|0) interval=5;; esac
 [ "$interval" -le 59 ] || interval=59
 mkdir -p /etc/crontabs /etc/apcontroller
 chmod 700 /etc/apcontroller
+. /lib/functions.sh
+config_load apcontroller
+sync_opt_in(){ local id="$1" current;config_get current "$id" pull_sync;case "$current" in 0|1) return;;esac;if [ -f /etc/apcontroller/pull-server/$id.pub ]; then uci set "apcontroller.$id.pull_sync=1";else uci set "apcontroller.$id.pull_sync=0";fi; }
+config_foreach sync_opt_in host
+uci commit apcontroller
 touch /etc/crontabs/root
 awk '!/\/usr\/bin\/apcontroller([[:space:]]|$)/' /etc/crontabs/root > /etc/crontabs/root.apcontroller.tmp
 printf '*/%s * * * * /usr/bin/apcontroller\n' "$interval" >> /etc/crontabs/root.apcontroller.tmp

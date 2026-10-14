@@ -7,6 +7,7 @@ case "$targets" in ''|*[!a-zA-Z0-9_,]*) echo 'Wybierz konkretne AP' >&2;exit 2;;
 failed=0
 for host in $(printf '%s' "$targets" | tr ',' ' '); do
  [ "$(uci -q get "apcontroller.$host.platform")" = openwrt ] && [ "$(uci -q get "apcontroller.$host.enabled")" = 1 ] || { echo "$host: nie jest włączonym AP OpenWrt";failed=1;continue; }
+ [ "$(uci -q get "apcontroller.$host.pull_sync")" = 1 ] || { echo "$host: synchronizacja jest wyłączona";failed=1;continue; }
  ip=$(uci -q get "apcontroller.$host.ipaddr");user=$(uci -q get "apcontroller.$host.username");pass=$(uci -q get "apcontroller.$host.password" || true);port=$(uci -q get "apcontroller.$host.port" || echo 22);key=$(uci -q get "apcontroller.$host.keyfile" || true);use=$(uci -q get "apcontroller.$host.usekeyfile" || echo 0)
  if apc_ssh_exec "$ip" "$port" "$user" "$pass" "$key" "$use" 'test -x /usr/bin/apcontroller-pull && /usr/bin/apcontroller-pull'; then echo "$host ($ip): OK — pobrano aktualny stan";else echo "$host ($ip): stan zapisany na głównym; AP nadrobi po odzyskaniu połączenia";failed=1;fi
 done
