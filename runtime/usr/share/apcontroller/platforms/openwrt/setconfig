@@ -13,16 +13,24 @@ FILE="$1"
 . /usr/share/libubox/jshn.sh
 
 NEEDCOMMIT=0
+WORKDIR=$(dirname "$FILE")
+. "$WORKDIR/vlan.sh"
 umask 077
+if [ "${APC_PREFLIGHT:-0}" != 1 ]; then
 mkdir -p /etc/apcontroller/before-send
 for cfg in network wireless; do [ -f /etc/apcontroller/before-send/$cfg ] || cp /etc/config/$cfg /etc/apcontroller/before-send/$cfg; done
 for path in /etc/config/network /etc/config/wireless /etc/apcontroller/before-send/; do grep -qxF "$path" /etc/sysupgrade.conf || echo "$path" >> /etc/sysupgrade.conf; done
 
+fi
+
 wifi_ensure_vlan(){
-	local net="$1" vid="$2" guestports links base sec bridge dev found vlanidx used oldproto primary port tagged
+	local net="$1" vid="$2" current guestports links base sec bridge dev found vlanidx used oldproto primary port tagged
 	[ -n "$vid" ] || return 0
 	case "$net:$vid" in *[!a-zA-Z0-9_:]*) echo 'Nieprawidłowa sieć/VLAN' >&2; return 1;; esac
-	[ "$vid" -ge 2 ] && [ "$vid" -le 4094 ] || return 1
+	[ "$vid" -ge 1 ] && [ "$vid" -le 4094 ] || return 1
+	current=$(apc_network_vlan "$net" || true)
+	if [ "$current" = "$vid" ]; then echo "APC: $net używa istniejącego VLAN $vid";return 0;fi
+	if [ -n "$current" ]; then echo "Interfejs $net ma VLAN $current, żądany $vid. Użyj nowej sieci albo zmień przypisanie; nie nadpisano wspólnego interfejsu." >&2;return 1;fi
 	case "$net" in lan|wan|guest|loopback) echo 'Nie wolno zastąpić sieci zarządzającej VLAN-em Wi-Fi' >&2; return 1;; esac
 	oldproto=$(uci -q get network.$net.proto)
 	case "$oldproto" in ''|none) ;; *) echo 'Istniejący interfejs ma adres/routing; nie zostanie zastąpiony' >&2; return 1;; esac
@@ -47,9 +55,11 @@ wifi_ensure_vlan(){
 			[ "$used" != 0 ] || { vlanidx=$candidate; break; }
 		done
 		[ -n "$vlanidx" ] || { echo 'Brak wolnego indeksu VLAN switcha' >&2; return 1; }
+		[ "${APC_PREFLIGHT:-0}" != 1 ] || return 0
 		sec=apc_vlan_$vid
 		uci set network.$sec=switch_vlan; uci set network.$sec.device=switch0; uci set network.$sec.vlan="$vlanidx"; uci set network.$sec.vid="$vid"; uci set network.$sec.ports="$guestports"
 	fi
+	[ "${APC_PREFLIGHT:-0}" != 1 ] || return 0
 	bridge=$(uci -q get network.$net.device)
 	case "$bridge" in br-*) ;; *) bridge=br-apc-$net;; esac
 	dev=''
@@ -69,7 +79,6 @@ wifi_ensure_vlan(){
 		uci add_list network.$dev.ports="$base.$vid"
 	done
 	uci set network.$net=interface; uci set network.$net.proto=none; uci set network.$net.device="$bridge"; uci -q delete network.$net.type
-	uci commit network
 	NEEDCOMMIT=1
 }
 
@@ -150,6 +159,8 @@ wifi_update() {
 	local ISOLATE="$8"
 	local MACFILTER="$9"
 	local MACLIST="${10}"
+	local NETWORK="${11}"
+	uci set wireless."$SEC".network="$NETWORK"
 
 	if [ "$ENABLED" -eq 0 ]; then
 		uci set wireless."$SEC".disabled=1
@@ -171,6 +182,30 @@ json_load_file "$FILE" || exit 2
 
 json_is_a wifis array || exit 2
 
+preflight_wifi(){
+ local index=1 old="${APC_PREFLIGHT:-0}" enabled band network ssid encryption key vlan_id radios
+ APC_PREFLIGHT=1;json_select wifis
+ while json_is_a "$index" object; do
+  json_select "$index";json_get_vars enabled band network ssid encryption key vlan_id
+  case "$network" in ''|*[!a-zA-Z0-9_]*) echo 'Nieprawidłowa nazwa sieci AP' >&2;return 2;; esac
+  [ -n "$ssid" ] && [ "$(printf '%s' "$ssid" | wc -c)" -le 32 ] || { echo 'SSID musi mieć 1–32 bajty' >&2;return 2; }
+  case "$enabled" in 0|1) ;; *) echo 'Nieprawidłowy stan Wi-Fi' >&2;return 2;; esac
+  case "$band" in 2g|5g|6g) ;; *) echo 'Nieprawidłowe pasmo' >&2;return 2;; esac
+  case "$encryption" in none) ;; psk2|psk2+ccmp|sae|sae-mixed|psk-mixed|psk-mixed+ccmp)
+   [ "${#key}" -ge 8 ] && [ "${#key}" -le 63 ] || { echo 'Hasło WPA musi mieć 8–63 znaki' >&2;return 2; };; *) echo 'Nieobsługiwane szyfrowanie w adapterze' >&2;return 2;; esac
+  wifi_ensure_vlan "$network" "$vlan_id" || return 2
+  [ -n "$vlan_id" ] || [ "$(uci -q get "network.$network")" = interface ] || { echo "Sieć $network nie istnieje na AP i nie podano VLAN-u" >&2;return 2; }
+  case "$band" in 2g) pattern="\.band='2g'|\.hwmode='11g'";;5g) pattern="\.band='5g'|\.hwmode='11a'";;6g) pattern="\.band='6g'";;esac
+  radios=$(uci -q show wireless | grep -E "$pattern" || true)
+  [ -n "$radios" ] || { echo "Brak radia $band na AP" >&2;return 2; }
+  json_select ..;index=$((index+1))
+ done
+ json_select ..;APC_PREFLIGHT=$old
+}
+preflight_wifi || exit 2
+if [ "${APC_PREFLIGHT:-0}" = 1 ]; then echo 'APC: sprawdzenie zakończone; bez zmian';exit 0;fi
+
+
 
 #
 # Delete existing AP interfaces
@@ -182,6 +217,7 @@ if [ "$delete" = "1" ]; then
 		awk -F[.=] '/=wifi-iface$/{print $2}')
 
 	for SECTION in $EXISTING; do
+		[ "$(uci -q get "wireless.$SECTION.mode")" = ap ] || continue
 		uci -q delete wireless."$SECTION"
 	done
 
@@ -243,8 +279,8 @@ while json_is_a "$IDX" object; do
 	#
 	# Additional script
 	#
-	if [ -e /tmp/apcontroller.user ]; then
-		sh /tmp/apcontroller-agent-as \
+	if [ -e "$WORKDIR/apcontroller.user" ]; then
+		APC_USER_SCRIPT="$WORKDIR/apcontroller.user" sh "$WORKDIR/apcontroller-agent-as" \
 			"$enabled" \
 			"$ssid" \
 			"$band" \
@@ -299,8 +335,11 @@ while json_is_a "$IDX" object; do
 	#
 	# Find existing interfaces with this SSID
 	#
-	SECTIONS=$(uci -q show wireless |
-		awk -F. '/\.ssid='\'''"$ssid"''\''$/{print $2}')
+	SECTIONS=''
+	for candidate in $(uci -q show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+		[ "$(uci -q get "wireless.$candidate.mode")" = ap ] || continue
+		[ "$(uci -q get "wireless.$candidate.ssid")" != "$ssid" ] || SECTIONS="$SECTIONS $candidate"
+	done
 
 
 	if [ -z "$SECTIONS" ]; then
@@ -335,7 +374,7 @@ while json_is_a "$IDX" object; do
 
 					T2=$(uci -q get wireless."$SECTION".network)
 
-					if [ "$T2" = "$network" ]; then
+					if true; then
 
 						wifi_update \
 							"$SECTION" \
@@ -347,7 +386,8 @@ while json_is_a "$IDX" object; do
 							"$hidden" \
 							"$isolate" \
 							"$macfilter" \
-							"$MACLIST"
+							"$MACLIST" \
+							"$network"
 
 						NEEDCOMMIT=1
 						FOUND=1
@@ -387,7 +427,8 @@ done
 #
 # Apply configuration
 #
-if [ "$NEEDCOMMIT" -eq 1 ]; then
+if [ "$NEEDCOMMIT" -eq 1 ] && { [ -n "$(uci -q changes wireless)" ] || [ -n "$(uci -q changes network)" ]; }; then
+	uci commit network
 	uci commit wireless
 	/etc/init.d/network reload >/dev/null
 	wifi reload
@@ -395,7 +436,7 @@ fi
 
 
 rm -f "$FILE"
-rm -f /tmp/apcontroller.user
-rm -f /tmp/apcontroller-agent-as
+rm -f "$WORKDIR/apcontroller.user"
+rm -f "$WORKDIR/apcontroller-agent-as"
 
 exit 0

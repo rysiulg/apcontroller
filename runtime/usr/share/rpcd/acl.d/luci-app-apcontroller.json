@@ -69,6 +69,9 @@
         ],
         "/usr/bin/apcontroller-scripts": [
           "exec"
+        ],
+        "/usr/bin/apcontroller-wifi-job": [
+          "exec"
         ]
       },
       "ubus": {

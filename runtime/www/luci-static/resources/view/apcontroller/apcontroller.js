@@ -53,9 +53,27 @@ function scriptsToolbar(){
 }
 function scanToolbar(){
  const select=E('select',{'aria-label':'Podsieć skanowania'}),summary=E('span',{},'Ładowanie…'),table=E('div'),details=E('details',{},[E('summary',{},'Wyniki skanowania / fallback 169.254'),table]);let busy=false;
- const display=r=>{summary.textContent=r.error?r.error:r.running?'Skanowanie w toku…':r.updated?'Znaleziono '+r.hosts.length+' wpisów · '+new Date(r.updated*1000).toLocaleString():'Jeszcze nie skanowano';if(!select.options.length)(r.scopes||[]).forEach(v=>select.appendChild(E('option',{value:v},v)));table.replaceChildren(E('p',{},r.note||'Skan ICMP oraz odczyt ARP i klientów z AP. Brak dzierżawy nie oznacza automatycznie awarii DHCP.'),E('table',{'class':'table'},[E('tr',{},['IP','MAC','Nazwa','Źródło/AP','Ocena'].map(v=>E('th',{},v))),...(r.hosts||[]).sort((a,b)=>Number(b.ip.startsWith('169.254.'))-Number(a.ip.startsWith('169.254.'))).map(h=>E('tr',{style:h.ip.startsWith('169.254.')?'background:#ffe2c5':''},[h.ip||'—',h.mac,h.name||'—',h.source,h.status].map(v=>E('td',{},v))))]));};
+ const order=E('select',{'aria-label':'Sortowanie wyników'},['IP','Nazwa','Ocena'].map(v=>E('option',{value:v},v)));let last=null;order.addEventListener('change',()=>{if(last)display(last);});
+ const ipv4=ip=>String(ip||'').split('.').reduce((v,n)=>v*256+Number(n),0);
+ const sourceCell=source=>{const values=String(source||'').split(/,\s*/).filter(Boolean);if(values.length<2)return E('td',{},values[0]||'—');return E('td',{},E('details',{},[E('summary',{},'Widziało '+values.length+' AP'),E('span',{style:'overflow-wrap:anywhere'},values.join(', '))]));};
+ const display=r=>{last=r;summary.textContent=r.error?r.error:r.running?'Skanowanie w toku…':r.updated?'Znaleziono '+(r.hosts||[]).length+' wpisów · '+new Date(r.updated*1000).toLocaleString():'Jeszcze nie skanowano';if(!select.options.length)(r.scopes||[]).forEach(v=>select.appendChild(E('option',{value:v},v)));
+ const groups=new Map();for(const host of r.hosts||[]){const subnet=String(host.ip||'').split('.').slice(0,3).join('.')+'.0/24';if(!groups.has(subnet))groups.set(subnet,[]);groups.get(subnet).push(host);}
+ const sections=[...groups].sort((a,b)=>Number(b[0].startsWith('169.254.'))-Number(a[0].startsWith('169.254.'))||ipv4(a[0].split('/')[0])-ipv4(b[0].split('/')[0])).map(([subnet,hosts])=>{const fallback=subnet.startsWith('169.254.'),native=subnet==='10.48.18.0/24',color=fallback?'#ffe2c5':native?'#e6f3e8':'#e7effb';hosts.sort((a,b)=>order.value==='Nazwa'?String(a.name||'').localeCompare(String(b.name||'')):order.value==='Ocena'?String(a.status||'').localeCompare(String(b.status||'')):ipv4(a.ip)-ipv4(b.ip));return E('details',{open:groups.size===1||fallback},[E('summary',{style:'background:'+color+';padding:.45em;margin-top:.5em'},subnet+' · '+hosts.length+' urządzeń · '+(fallback?'adresy link-local':native?'LAN MARM':'inna podsieć')),E('table',{class:'table'},[E('tr',{},['IP hosta','MAC','Nazwa','Zaobserwowano na AP','Ocena'].map(v=>E('th',{},v))),...hosts.map(h=>E('tr',{},[E('td',{},h.ip||'—'),E('td',{},h.mac||'—'),E('td',{},h.name||'—'),sourceCell(h.source),E('td',{},h.status||'—')]))])]);});
+ table.replaceChildren(E('p',{},r.note||'Brak dzierżawy nie oznacza automatycznie awarii DHCP.'),E('p',{},'Lista AP wskazuje miejsca obserwacji tego samego hosta; nie są to dodatkowe adresy hosta. Kolory: zielony LAN MARM, niebieski inne podsieci, pomarańczowy 169.254.'),order,...sections);
+ };
  const refresh=async()=>{const r=await fs.exec('/usr/bin/apcontroller-scan',['report']);if(!r.code)try{display(JSON.parse(r.stdout));}catch(e){summary.textContent='Nie udało się odczytać wyników';}};
  const button=E('button',{type:'button',class:'cbi-button cbi-button-action',click:async()=>{if(busy||!select.value)return;busy=true;button.disabled=true;try{const r=await fs.exec('/usr/bin/apcontroller-scan',['start',select.value]);if(r.code)throw new Error(r.stderr||r.stdout);details.open=true;summary.textContent='Skanowanie rozpoczęte…';for(let i=0;i<60;i++){await new Promise(resolve=>setTimeout(resolve,2000));await refresh();const status=await fs.exec('/usr/bin/apcontroller-scan',['report']);if(!JSON.parse(status.stdout).running)break;}}catch(e){summary.textContent=e.message;}finally{busy=false;button.disabled=false;}}},'Skanuj urządzenia');refresh();return E('div',{'class':'apc-scanner'},[select,button,summary,details]);
+}
+async function saveWiFiForm(option,map){
+ const modal=option.section.getActiveModalMap(),active=modal&&dom.findClassInstance(modal);if(active)await active.save(null,true);else await map.save();await uci.save();await apcCommit('apcontroller');
+}
+async function sendWiFiJob(group,targets,check){
+ if(!targets.length)throw new Error('Wybierz konkretne urządzenia AP.');
+ const status=E('p',{},'Sprawdzanie i wysyłanie…'),log=E('pre',{style:'white-space:pre-wrap;max-height:55vh;overflow:auto'}),details=E('details',{},[E('summary',{},'Szczegóły'),log]);
+ ui.showModal(check?'Sprawdzenie konfiguracji Wi-Fi':'Wysyłanie konfiguracji Wi-Fi',[status,details,E('button',{type:'button',class:'cbi-button',click:ui.hideModal},'Zamknij')]);
+ const started=await fs.exec('/usr/bin/apcontroller-wifi-job',[check?'check':'start',group,targets.join(',')]);if(started.code)throw new Error(started.stderr||started.stdout);
+ for(let i=0;i<150;i++){await new Promise(resolve=>setTimeout(resolve,2000));const r=await fs.exec('/usr/bin/apcontroller-wifi-job',['report']);if(r.code)throw new Error(r.stderr||r.stdout);const data=JSON.parse(r.stdout);log.textContent=data.output;if(data.done){status.textContent=data.code?'Błąd — rozwiń szczegóły':check?'Konfiguracja sprawdzona, bez zmian':'Konfiguracja wysłana';if(data.code)details.open=true;return;}}
+ status.textContent='Operacja trwa. Wynik zostaje zapisany na routerze.';
 }
 function nextFreeSid(name, offset) {
 	let sid = '' + name + offset;
@@ -2498,7 +2516,8 @@ return view.extend({
 		(devicestatus.hosts||[]).filter(h=>h.platform==='openwrt'||h.type==='openwrt').forEach(h=>String(h.network_names||'').split(/\s+/).filter(Boolean).forEach(n=>{if(!networkChoices.has(n))networkChoices.set(n,n+' — AP '+(h.name||h.ipaddr));}));
 		for(const [name,label] of networkChoices)o.value(name,label);
 		o.description='Wybierz istniejącą sieć lub wpisz nową nazwę. To interfejs na docelowym AP, nie SSID. Nowa sieć wymaga VLAN-u albo przygotowania na AP. Zapis nie publikuje Wi-Fi; dopiero Zapisz i wyślij.';
-		o=s.taboption('wifi',form.Value,'vlan_id','VLAN na AP (opcjonalnie)','Przy wysyłaniu przygotuj interfejs bez adresu i tagowanie jak istniejący VLAN gościnny. Obsługiwany wykryty układ switch_guest/dev_guest na OpenWrt; inne układy wymagają dodatkowego skryptu. Nie zmienia VLAN-ów na głównym routerze.');o.datatype='range(2,4094)';o.modalonly=true;o.rmempty=true;
+		o=s.taboption('wifi',form.Flag,'vlan_auto','VLAN z wybranego interfejsu routera');o.default='1';o.modalonly=true;o.rmempty=false;o.description='Odczytuje tagowanie istniejącego interfejsu. Na AP używa zgodnej sieci; przy innym VLAN-ie przerywa wysyłanie.';
+		o=s.taboption('wifi',form.Value,'vlan_id','VLAN na AP (opcjonalnie)','Przy wysyłaniu przygotuj interfejs bez adresu i tagowanie jak istniejący VLAN gościnny. Obsługiwany wykryty układ switch_guest/dev_guest na OpenWrt; inne układy wymagają dodatkowego skryptu. Nie zmienia VLAN-ów na głównym routerze.');o.datatype='range(1,4094)';o.modalonly=true;o.rmempty=true;o.depends('vlan_auto','0');
 		const vlanChoices=new Set();for(const type of ['device','switch_vlan','bridge-vlan'])uci.sections('network',type).forEach(n=>{const v=n.vid||(type!=='device'?n.vlan:null);if(Number(v)>=2&&Number(v)<=4094)vlanChoices.add(String(v));});uci.sections('apcontroller','wifi').forEach(w=>{if(w.vlan_id)vlanChoices.add(String(w.vlan_id));});(devicestatus.hosts||[]).forEach(h=>String(h.vlan_ids||'').split(/\s+/).filter(v=>Number(v)>=2&&Number(v)<=4094).forEach(v=>vlanChoices.add(v)));for(const vid of [...vlanChoices].sort((a,b)=>Number(a)-Number(b)))o.value(vid,'VLAN '+vid);o.description='Wybierz znany VLAN lub wpisz nowy (2–4094). Zapisz i wyślij utworzy sieć/VLAN tylko na zgodnych OpenWrt w rozpoznanym układzie portów; uplink i główny router muszą przenosić ten VLAN. Puste pole używa istniejącej sieci AP.';
 
 		o = s.taboption(
@@ -2554,7 +2573,7 @@ return view.extend({
 		const writableAP=id=>(uci.get('apcontroller',id,'platform')||(devicestatus.hosts||[]).find(h=>h.section===id)?.platform)==='openwrt';
 		uci.sections('apcontroller','host').filter(h=>writableAP(h['.name'])).forEach(h=>o.value(h['.name'],(h.name||h['.name'])+' ('+h.ipaddr+')'));
 		o.cfgvalue=function(id){return L.toArray(uci.get('apcontroller','map_'+id,'host'));};o.write=function(id,value){const group='map_'+id,targets=L.toArray(value).filter(Boolean);if(!targets.length){if(uci.get('apcontroller',group,'managed_wifi')===id)uci.remove('apcontroller',group);return;}if(!uci.get('apcontroller',group))uci.add('apcontroller','group',group);uci.set('apcontroller',group,'name','Wi-Fi: '+(uci.get('apcontroller',id,'name')||id));uci.set('apcontroller',group,'managed_wifi',id);uci.set('apcontroller',group,'host',targets);uci.set('apcontroller',group,'wifi',[id]);uci.set('apcontroller',group,'delete','0');uci.set('apcontroller',group,'useadditionalscript','0');};o.remove=function(id){this.write(id,[]);};
-		o=s.taboption('wifi',form.DummyValue,'_sendtargets','Wysyłanie do przypisanych AP');o.renderWidget=function(id){return E('button',{type:'button','class':'cbi-button',click:ui.createHandlerFn(this,async()=>{try{await m.save();await uci.save();await apcCommit('apcontroller');const r=await fs.exec('/usr/bin/apcontroller-sendconfig',['map_'+id,'verbose']);ui.showModal('Wynik wysyłania',[E('pre',{},r.stdout||r.stderr||'Brak przypisanych AP'),E('button',{type:'button','class':'cbi-button',click:ui.hideModal},'Zamknij')]);}catch(e){ui.addNotification(null,E('p',e.message),'error');}})},'Zapisz i wyślij konfigurację Wi-Fi');};o.modalonly=true;
+		o=s.taboption('wifi',form.DummyValue,'_sendtargets','Wysyłanie do wybranych AP');o.renderWidget=function(id){const option=this;return E('div',{},[...['Zapisz i wyślij','Zapisz i sprawdź bez zmian'].map((label,index)=>E('button',{type:'button',class:'cbi-button '+(index?'cbi-button-action':'cbi-button-positive'),click:ui.createHandlerFn(option,async()=>{try{await saveWiFiForm(option,m);const targets=L.toArray(uci.get('apcontroller','map_'+id,'host'));await sendWiFiJob('map_'+id,targets,!!index);}catch(e){ui.addNotification(null,E('p',e.message),'error');}})},label))]);};o.modalonly=true;
 
 		/*
 		 * AP GROUP
@@ -2631,98 +2650,12 @@ return view.extend({
 			return tdEl;
 		};
 
-		s.handleSendConfig = function(
-			section_id,
-			ev
-		) {
-			return this.map.save().then(()=>uci.save()).then(()=>apcCommit('apcontroller'))
-				.then(() => {
-					ui.showModal(
-						_('Sending commands'),
-						[
-							E(
-								'p',
-								{ 'class': 'spinning' },
-								_(
-									'Sending commands to devices...'
-								)
-							)
-						]
-					);
-
-					return fs.exec(
-						'/usr/bin/apcontroller-sendconfig',
-						[
-							section_id,
-							'verbose'
-						]
-					)
-					.then(res => {
-						ui.showModal(
-							_('Sending commands'),
-							[
-								res.stdout
-									? E(
-										'pre',
-										[res.stdout]
-									)
-									: '',
-
-								res.stderr
-									? E(
-										'pre',
-										[res.stderr]
-									)
-									: '',
-
-								E(
-									'div',
-									{ 'class': 'right' },
-									[
-										E(
-											'button',
-											{
-												'class':
-													'cbi-button cbi-button-primary',
-												'click':
-													ui.hideModal
-											},
-											_('Dismiss')
-										)
-									]
-								)
-							]
-						);
-					})
-					.catch(err => {
-						ui.hideModal();
-
-						ui.addNotification(
-							null,
-							[
-								E(
-									'p',
-									[
-										_('Error') +
-										': ',
-										err
-									]
-								)
-							]
-						);
-					});
-				})
-				.catch(err => {
-					ui.addNotification(
-						null,
-						E(
-							'p',
-							err?.message || err
-						),
-						'error'
-					);
-				});
-		};
+		s.handleSendConfig=async function(id){
+ try{await this.map.save();await uci.save();await apcCommit('apcontroller');const hosts=L.toArray(uci.get('apcontroller',id,'host')),checks=hosts.map(host=>{const input=E('input',{type:'checkbox',checked:true,value:host});return {input,node:E('label',{style:'display:block;margin:.3em 0'},[input,' '+(uci.get('apcontroller',host,'name')||host)+' ('+(uci.get('apcontroller',host,'ipaddr')||'?')+')'])};});
+ const run=check=>ui.createHandlerFn(this,async()=>{try{await sendWiFiJob(id,checks.filter(v=>v.input.checked).map(v=>v.input.value),check);}catch(e){ui.addNotification(null,E('p',e.message),'error');}});
+ ui.showModal('Wybierz urządzenia docelowe',[E('p',{},uci.get('apcontroller',id,'delete')==='1'?'Uwaga: ta grupa usuwa istniejące sekcje Wi-Fi na wybranych AP przed wysłaniem.':'Wyśle tylko do zaznaczonych AP. Pozostałe urządzenia nie otrzymają konfiguracji.'),...checks.map(v=>v.node),E('button',{type:'button',class:'cbi-button cbi-button-action',click:run(true)},'Sprawdź bez zmian'),E('button',{type:'button',class:'cbi-button cbi-button-positive',click:run(false)},'Wyślij do wybranych'),E('button',{type:'button',class:'cbi-button',click:ui.hideModal},'Anuluj')]);
+ }catch(e){ui.addNotification(null,E('p',e.message),'error');}
+ };
 
 		o = s.taboption(
 			'group',

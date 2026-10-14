@@ -177,6 +177,15 @@
         "extract": "^(.+)$"
       },
       "default": ""
+    },
+    {
+      "name": "network_vlans",
+      "type": "string",
+      "source": {
+        "command": "# Odczyt VLAN-u interfejsu; bez zmian konfiguracji.\napc_device_vlans(){\n local device=\"$1\" depth=\"${2:-0}\" section type vid port\n [ \"$depth\" -lt 5 ] || return 0\n case \"$device\" in *.[0-9]*) vid=${device##*.};case \"$vid\" in *[!0-9]*|'') ;; *) [ \"$vid\" -ge 1 ] && [ \"$vid\" -le 4094 ] && printf '%s\\n' \"$vid\" && return 0;; esac;; esac\n for section in $(uci -q show network | sed -n 's/^network\\.\\([^=]*\\)=device$/\\1/p'); do\n  [ \"$(uci -q get \"network.$section.name\")\" = \"$device\" ] || continue\n  type=$(uci -q get \"network.$section.type\");vid=$(uci -q get \"network.$section.vid\")\n  case \"$type:$vid\" in 8021q:*|8021ad:*) case \"$vid\" in ''|*[!0-9]*) ;; *) printf '%s\\n' \"$vid\";; esac;; esac\n  if [ \"$type\" = bridge ]; then for port in $(uci -q get \"network.$section.ports\"); do apc_device_vlans \"$port\" \"$((depth+1))\"; done; fi\n done\n}\napc_network_vlan(){\n local device result\n device=$(uci -q get \"network.$1.device\" || uci -q get \"network.$1.ifname\")\n result=$(for device in $device; do apc_device_vlans \"$device\"; done | sort -nu)\n set -- $result\n [ \"$#\" = 1 ] || return 1\n printf '%s' \"$1\"\n}\n\n. /lib/functions.sh; config_load network; apc_vlan_row(){ local vid;vid=$(apc_network_vlan \"$1\");[ -z \"$vid\" ] || printf \"%s=%s \" \"$1\" \"$vid\"; }; config_foreach apc_vlan_row interface",
+        "extract": "^(.+)$"
+      },
+      "default": ""
     }
   ],
   "collections": {

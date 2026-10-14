@@ -5,6 +5,6 @@ _SSID=$2
 _BAND=$3
 _NETWORK=$4
 
-[ -e /tmp/apcontroller.user ] && . /tmp/apcontroller.user
+[ -e "${APC_USER_SCRIPT:-/tmp/apcontroller.user}" ] && . "${APC_USER_SCRIPT:-/tmp/apcontroller.user}"
 
 exit 0
