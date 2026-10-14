@@ -57,13 +57,24 @@ function backupToolbar(){
  const button=E('button',{type:'button',class:'cbi-button cbi-button-positive',click:async()=>{if(busy)return;busy=true;button.disabled=true;try{const r=await fs.exec('/usr/bin/apcontroller-backup',['start']);if(r.code)throw new Error(r.stderr||r.stdout);status.textContent='Zbieranie z głównego routera i włączonych OpenWrt…';for(let i=0;i<300;i++){await new Promise(resolve=>setTimeout(resolve,3000));if((await refresh()).done)break;}}catch(e){status.textContent=e.message;}finally{busy=false;button.disabled=false;}}},'Zbierz backup i wyślij na NAS');refresh().catch(e=>status.textContent=e.message);
  return E('details',{class:'apc-backups'},[E('summary',{},'Backup głównego routera i AP'),E('p',{},'AP przesyłają kopie przez SSH do głównego routera. Główny dodaje własną kopię, szyfruje paczkę i wysyła ją do NAS. Harmonogram pozostaje wyłączony.'),button,E('button',{type:'button',class:'cbi-button',click:()=>refresh().catch(e=>status.textContent=e.message)},'Odśwież status'),status,details]);
 }
+function subnetNetwork(cidr){
+ const [ip,bitsText]=String(cidr||'').split('/'),bytes=ip.split('.').map(Number),bits=Number(bitsText);if(bytes.length!==4||bytes.some(n=>!Number.isInteger(n)||n<0||n>255)||bitsText==null||!Number.isInteger(bits)||bits<0||bits>32)return null;
+ const value=bytes.reduce((n,b)=>n*256+b,0),base=Math.floor(value/2**(32-bits))*2**(32-bits);return [24,16,8,0].map(n=>(base>>>n)&255).join('.')+'/'+bits;
+}
+function configuredSubnets(){
+ const list=L.toArray(uci.get('apcontroller','@global[0]','native_subnet')||['10.48.18.0/24']);uci.sections('multivpn','vpn').forEach(p=>list.push(...L.toArray(p.remote_subnet)));
+ uci.sections('network','interface').forEach(n=>{const mask=String(n.netmask||'').split('.'),binary=mask.length===4?mask.map(v=>Number(v).toString(2).padStart(8,'0')).join(''):'';const bits=/^1*0*$/.test(binary)&&binary.length===32?binary.replace(/0/g,'').length:null;L.toArray(n.ipaddr).forEach(ip=>{if(ip.includes('/'))list.push(ip);else if(bits!=null)list.push(ip+'/'+bits);});});return [...new Set(list.map(subnetNetwork).filter(Boolean))];
+}
+function addressSubnet(ip,scopes){
+ const value=String(ip||'').split('.').reduce((n,b)=>n*256+Number(b),0);return [...new Set([...configuredSubnets(),...(scopes||[]).map(subnetNetwork).filter(Boolean)])].sort((a,b)=>Number(b.split('/')[1])-Number(a.split('/')[1])).find(c=>{const [base,bits]=c.split('/'),n=base.split('.').reduce((v,b)=>v*256+Number(b),0);return Math.floor(value/2**(32-Number(bits)))===Math.floor(n/2**(32-Number(bits)));})||null;
+}
 function scanToolbar(){
  const select=E('select',{'aria-label':'Podsieć skanowania'}),summary=E('span',{},'Ładowanie…'),table=E('div'),details=E('details',{},[E('summary',{},'Wyniki skanowania / fallback 169.254'),table]);let busy=false;
  const order=E('select',{'aria-label':'Sortowanie wyników'},['IP','Nazwa','Ocena'].map(v=>E('option',{value:v},v)));let last=null;order.addEventListener('change',()=>{if(last)display(last);});
  const ipv4=ip=>String(ip||'').split('.').reduce((v,n)=>v*256+Number(n),0);
  const sourceCell=source=>{const values=String(source||'').split(/,\s*/).filter(Boolean);if(values.length<2)return E('td',{},values[0]||'—');return E('td',{},E('details',{},[E('summary',{},'Widziało '+values.length+' AP'),E('span',{style:'overflow-wrap:anywhere'},values.join(', '))]));};
  const display=r=>{last=r;summary.textContent=r.error?r.error:r.running?'Skanowanie w toku…':r.updated?'Znaleziono '+(r.hosts||[]).length+' wpisów · '+new Date(r.updated*1000).toLocaleString():'Jeszcze nie skanowano';if(!select.options.length)(r.scopes||[]).forEach(v=>select.appendChild(E('option',{value:v},v)));
- const groups=new Map();for(const host of r.hosts||[]){const subnet=String(host.ip||'').split('.').slice(0,3).join('.')+'.0/24';if(!groups.has(subnet))groups.set(subnet,[]);groups.get(subnet).push(host);}
+ const groups=new Map();for(const host of r.hosts||[]){const subnet=addressSubnet(host.ip,r.scopes)||(host.ip.startsWith('169.254.')?'169.254.0.0/16':String(host.ip||'').split('.').slice(0,3).join('.')+'.0/24 (maska nieznana)');if(!groups.has(subnet))groups.set(subnet,[]);groups.get(subnet).push(host);}
  const sections=[...groups].sort((a,b)=>Number(b[0].startsWith('169.254.'))-Number(a[0].startsWith('169.254.'))||ipv4(a[0].split('/')[0])-ipv4(b[0].split('/')[0])).map(([subnet,hosts])=>{const fallback=subnet.startsWith('169.254.'),native=subnet==='10.48.18.0/24',color=fallback?'#ffe2c5':native?'#e6f3e8':'#e7effb';hosts.sort((a,b)=>order.value==='Nazwa'?String(a.name||'').localeCompare(String(b.name||'')):order.value==='Ocena'?String(a.status||'').localeCompare(String(b.status||'')):ipv4(a.ip)-ipv4(b.ip));return E('details',{open:groups.size===1||fallback},[E('summary',{style:'background:'+color+';padding:.45em;margin-top:.5em'},subnet+' · '+hosts.length+' urządzeń · '+(fallback?'adresy link-local':native?'LAN MARM':'inna podsieć')),E('table',{class:'table'},[E('tr',{},['IP hosta','MAC','Nazwa','Zaobserwowano na AP','Ocena'].map(v=>E('th',{},v))),...hosts.map(h=>E('tr',{},[E('td',{},h.ip||'—'),E('td',{},h.mac||'—'),E('td',{},h.name||'—'),sourceCell(h.source),E('td',{},h.status||'—')]))])]);});
  table.replaceChildren(E('p',{},r.note||'Brak dzierżawy nie oznacza automatycznie awarii DHCP.'),E('p',{},'Lista AP wskazuje miejsca obserwacji tego samego hosta; nie są to dodatkowe adresy hosta. Kolory: zielony LAN MARM, niebieski inne podsieci, pomarańczowy 169.254.'),order,...sections);
  };
@@ -140,7 +151,7 @@ return view.extend({
 			L.resolveDefault(fs.read_direct(additionalScriptFile), ''),
 			uci.load('apcontroller'),
 			L.resolveDefault(uci.load('network'),null),
-			Promise.resolve(null),
+			L.resolveDefault(uci.load('multivpn'),null),
 			Promise.resolve(null)
 		]);
 	},
@@ -286,7 +297,7 @@ return view.extend({
 			const ips=String(value||'').match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)||[], native=L.toArray(uci.get('apcontroller','@global[0]','native_subnet')||['10.48.18.0/24']);
 			const ip=ips.find(ip=>ipv4(ip)!=null&&!native.some(c=>inSubnet(ip,c))); if(!ip)return null;
 			const profile=uci.sections('multivpn','vpn').find(p=>inSubnet(ip,p.remote_subnet));
-			const label=profile?profile.remote_subnet:ip.split('.').slice(0,3).join('.')+'.0/24'; let hash=0; for(const c of label)hash=(hash*31+c.charCodeAt(0))>>>0;
+			const label=addressSubnet(ip,[])||'adres '+ip+' (maska nieznana)'; let hash=0; for(const c of label)hash=(hash*31+c.charCodeAt(0))>>>0;
 			return {label:label, color:['#3973b9','#9855a6','#ad6500','#147d78','#a34c66'][hash%5]};
 		}
 		function clientSummary(list) {
@@ -3029,12 +3040,13 @@ return view.extend({
 			63
 		);
 
+		const scannerSection=m.section(form.TypedSection,'scanner','Skanowanie');scannerSection.cfgsections=()=>[];scannerSection.render=()=>Promise.resolve(E('div',{class:'cbi-section',id:'cbi-apcontroller-scanner','data-tab':'scanner','data-tab-title':'Skanowanie'},[E('h3',{},'Skanowanie urządzeń i DHCP'),E('p',{},'Grupowanie używa masek z interfejsów, profili VPN i zakresów skanowania. 192.168.32.0/22 jest używane zarówno lokalnie w MARM, jak i w Zaciszu; zakres IP sam nie określa lokalizacji.'),scanToolbar()]));
 		for(const section of m.children)if(section instanceof form.GridSection)section.handleModalSave=async function(modalMap,ev){try{const active=dom.findClassInstance(this.getActiveModalMap());await active.save(null,true);await uci.save();await apcCommit('apcontroller');await this.handleModalCancel(modalMap,ev,true);await m.load();await m.reset();}catch(e){ui.addNotification(null,E('p',e.message),'error');}};
 		return m.render().then(root => {
 			root.classList.add('apcontroller-page');
 			const pageStyle=E('style', {}, '.apcontroller-page{min-width:0;max-width:100%;margin-left:0}.apcontroller-page .cbi-tblsection{min-width:0;max-width:100%;overflow-x:auto}.apcontroller-page table{margin-left:0!important;width:100%;font-size:.9em}.apcontroller-page table th,.apcontroller-page table td{padding:7px 6px!important;vertical-align:middle;overflow-wrap:anywhere}.apcontroller-page td[data-name="name"]{max-width:190px}.apcontroller-page td[data-name="_status"],.apcontroller-page td[data-name="ipaddr"]{white-space:nowrap}.apcontroller-page .cbi-section-actions{white-space:nowrap}.apcontroller-page .apc-package-status{white-space:pre-wrap;overflow-wrap:anywhere;max-height:250px;overflow:auto}.apc-package-actions{display:flex;gap:8px;flex-wrap:wrap}.apc-client-summary{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.apc-client-summary>div{border:1px solid var(--border-color-medium);border-radius:6px;padding:8px 16px;display:flex;gap:12px;align-items:center}.apc-client-summary strong{font-size:1.35em}.apc-subnet{border-left:4px solid;padding:2px 7px;border-radius:3px;display:inline-block}.apc-subnet-legend{display:flex;gap:14px;flex-wrap:wrap}#cbi-apcontroller-vpn table{min-width:880px}#cbi-apcontroller-vpn table td,#cbi-apcontroller-vpn table th{overflow-wrap:normal;word-break:normal}#cbi-apcontroller-vpn td[data-name=remote_subnet]{white-space:nowrap}#cbi-apcontroller-vpn .apc-package-actions{gap:4px;min-width:160px}');
 			root.querySelectorAll('#cbi-apcontroller-host table').forEach(table => { if (table.parentElement.id !== 'cbi-apcontroller-host') return; const wrap=E('div', {'class':'apc-table-scroll',style:'max-width:100%;overflow-x:auto'}); table.before(wrap); wrap.appendChild(table); });
-			return E('div',{class:'apcontroller-page'},[pageStyle,scanToolbar(),scriptsToolbar(),backupToolbar(),root]);
+			return E('div',{class:'apcontroller-page'},[pageStyle,scriptsToolbar(),backupToolbar(),root]);
 		});
 	},
 
