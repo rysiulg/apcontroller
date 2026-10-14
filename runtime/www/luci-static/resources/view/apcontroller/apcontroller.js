@@ -65,7 +65,7 @@ function scanToolbar(){
  const button=E('button',{type:'button',class:'cbi-button cbi-button-action',click:async()=>{if(busy||!select.value)return;busy=true;button.disabled=true;try{const r=await fs.exec('/usr/bin/apcontroller-scan',['start',select.value]);if(r.code)throw new Error(r.stderr||r.stdout);details.open=true;summary.textContent='Skanowanie rozpoczęte…';for(let i=0;i<60;i++){await new Promise(resolve=>setTimeout(resolve,2000));await refresh();const status=await fs.exec('/usr/bin/apcontroller-scan',['report']);if(!JSON.parse(status.stdout).running)break;}}catch(e){summary.textContent=e.message;}finally{busy=false;button.disabled=false;}}},'Skanuj urządzenia');refresh();return E('div',{'class':'apc-scanner'},[select,button,summary,details]);
 }
 async function saveWiFiForm(option,map){
- const modal=option.section.getActiveModalMap(),active=modal&&dom.findClassInstance(modal);if(active)await active.save(null,true);else await map.save();await uci.save();await apcCommit('apcontroller');
+ const active=option.map||map;await active.save(null,true);await uci.save();await apcCommit('apcontroller');
 }
 async function sendWiFiJob(group,targets,check){
  if(!targets.length)throw new Error('Wybierz konkretne urządzenia AP.');
