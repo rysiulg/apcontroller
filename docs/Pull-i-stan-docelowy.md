@@ -1,0 +1,19 @@
+# Stan docelowy OpenWrt: zapis, push i pobieranie po starcie
+
+Główny przechowuje prywatną, wersjonowaną paczkę dla każdego przypisanego OpenWrt. Zawiera pełną sumę przypisań szablonów z grup AP, dane VLAN z interfejsu, skrypt zastosowania i ewentualny dodatkowy skrypt. Ta paczka zawiera hasła Wi-Fi, dlatego pozostaje w /etc/apcontroller/desired z prawami dostępu tylko dla root; nie trafia do WWW, GitHub ani materiałów przeglądowych NAS.
+
+Domyślnie Zapisz/Save & Apply publikuje stan dla przypisanych włączonych OpenWrt. Można wyłączyć automatyczną publikację w Ustawieniach. Zapisz i wyślij publikuje stan dla wybranych AP i wywołuje ich pobranie od razu. Sprawdzenie bez publikowania zapisuje projekt konfiguracji i sprawdza zgodność, ale pozostawia poprzednią wersję dla klientów. Kolejny zwykły zapis z włączoną publikacją opublikuje ten projekt.
+
+AP sprawdza paczkę około 25 sekund po starcie, potem co 2 minuty. Samo pojawienie się kabla po starcie zostanie obsłużone przy następnej próbie. Główny ponawia przygotowanie klienta, jeśli AP było niedostępne przy dodaniu. Publikacja nie wymaga dostępności AP. Zmiana wersji uruchamia walidację i zastosowanie; niezmieniona wersja nie jest ponownie wykonywana.
+
+Dodanie szablonu i przypisanie AP dodaje Wi-Fi na tych AP. Zmiana nazwy SSID aktualizuje dotychczasową sekcję według trwałego ID szablonu i pasma. Usunięcie szablonu, pasma lub przypisania usuwa tylko sekcje oznaczone jako zarządzane przez APController. Sekcje lokalne, mesh i stacje pozostają. Usunięcie Wi-Fi w GUI czyści jego odwołania w grupach; automatyczna grupa pojedynczego szablonu jest usuwana razem z nim. Nowa, nieprzypisana sieć nie zostaje rozgłoszona.
+
+Przy pierwszym uruchomieniu przejmowane są istniejące zgodne SSID oraz te udokumentowane jako wcześniejsze przypisania kontrolera. Nieznane stare SSID nie są automatycznie usuwane. Dotyczy to np. sieci utworzonej ręcznie lub pozostałości bez potwierdzonego przypisania. Prywatna lista migracji jest oddzielona od kodu projektu.
+
+Każda końcówka ma własny klucz SSH. Główny przypisuje mu forced command, który może odczytać wyłącznie paczkę tego AP. Nie daje powłoki, tunelowania ani dostępu do cudzych konfiguracji. Końcówka używa przypiętych kluczy hosta głównego routera; nie akceptuje automatycznie nieznanego klucza. Sumy zawartości i ograniczona lista plików kontrolują paczkę przed zastosowaniem. Po błędzie wykonania przywracane są network/wireless; skutków dowolnego dodatkowego skryptu nie da się ogólnie cofnąć, dlatego powinien być idempotentny.
+
+Pobieranie działa bez interaktywnych pytań i ma limit 45 sekund. Usługa używa właściwego katalogu konta root do sprawdzania known_hosts również w środowisku procd. VLAN sieci zarządzającej lan nie jest przenoszony z fizycznego układu głównego na inny model AP; używane jest istniejące lan. Dla pozostałych sieci automatyczny VLAN wynika z interfejsu głównego, a końcówka sprawdza zgodność przed zmianami. Wyłączenie/usunięcie AP blokuje również odczyt paczki jego kluczem.
+
+Stare zadania /root i /scripts dla sync-wireless-smart.sh, make_backup_usb.sh i automatycznej aktualizacji firmware są wyłączane na przygotowanych AP. Kopie cron i starych skryptów zostają w /etc/apcontroller/legacy-backup. Stare nazwy synchronizacji na AP wskazują nowego klienta. Automatyczny backup pozostaje wyłączony; ręczny zbiera główny i AP do NAS.
+
+Klient oraz jego prywatny stan, klucz i konfiguracje są dopisywane do sysupgrade.conf na AP, ponieważ końcówki nie mają zainstalowanego głównego pakietu. Payload głównego APController przywraca się z podpisanego repozytorium APK; prywatny stan i authorized_keys nadal wymagają backupu. Nie rozszerzamy automatycznie reguł VPN/firewalla dla połączenia zwrotnego AP → główny; zdalny AP musi mieć do niego dozwolony dostęp SSH. Omada/UniFi z fabrycznym firmware nie są obsługiwane przez ten klient.

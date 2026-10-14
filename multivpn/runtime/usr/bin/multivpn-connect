@@ -1,0 +1,194 @@
+#!/bin/sh
+set -e
+action=${1:-status}; selected=${2:-}
+case "$action" in status|apply|start|stop) ;; *) echo 'Nieobsługiwana akcja VPN' >&2; exit 2;; esac
+if [ "$action" = start ] || [ "$action" = stop ]; then [ -n "$selected" ] || { echo 'Wybierz jeden profil VPN' >&2; exit 2; }; fi
+case "$selected" in *[!a-z0-9_]*|?????????????*) echo 'Nieprawidłowy profil' >&2; exit 2;; esac
+if [ "$action" = status ]; then exec ucode /usr/share/multivpn-connect/profiles.uc status; fi
+umask 077
+exec 8>/tmp/apcontroller-vpn.lock
+flock -n 8 || { echo 'Trwa inna operacja VPN' >&2; exit 1; }
+tmp=$(mktemp /tmp/apcontroller-vpn.XXXXXX)
+trap 'rm -f "$tmp" "$tmp".*.changed' EXIT
+ucode /usr/share/multivpn-connect/profiles.uc "$action" "$selected" > "$tmp"
+. /lib/functions.sh
+config_load multivpn
+# Remove only resources recorded as belonging to deleted APController profiles.
+if [ -z "$selected" ] && [ -s /etc/multivpn-connect/vpn-managed ]; then
+    while read -r oldid oldtype oldiface oldzone; do
+        case "$oldid:$oldiface:$oldzone" in *[!a-z0-9_:]*) exit 2;; esac
+        [ "$(uci -q get "multivpn.$oldid" || true)" != vpn ] || continue
+        if [ "$oldtype" = ikev2 ] || [ "$oldtype" = sstp ]; then
+            if [ ! -d /sys/module/crypto_safexcel ]; then timeout -k 2 10 swanctl --terminate --ike "apc-$oldid" >/dev/null 2>&1 || true; fi
+            ifdown "$oldiface" >/dev/null 2>&1 || true
+            uci -q delete "network.$oldiface" || true; uci -q delete "firewall.$oldzone" || true
+            rm -f "/etc/swanctl/conf.d/apc-$oldid.conf" "/tmp/apcontroller-vpn-$oldid.json"
+            nft delete table ip "apcvpn_$oldid" 2>/dev/null || true
+        fi
+        for suffix in out in router mobile; do uci -q delete "firewall.apcvpn_${oldid}_$suffix" || true; done
+        uci -q delete "network.apcvpn_${oldid}_route" || true
+    done < /etc/multivpn-connect/vpn-managed
+fi
+field(){ config_get "$1" "$id" "$2" "${3:-}"; }
+ike_child_up(){
+    timeout -k 2 5 swanctl --list-sas --ike "apc-$1" 2>/dev/null | awk -v ike="apc-$1:" -v child="apc-$1-lan:" '$1==ike && /ESTABLISHED/ {a=1} $1==child && /INSTALLED/ {b=1} END {exit !(a && b)}'
+}
+ike_restore_path(){
+    local profile="$1" vip mode
+    mode=$(uci -q get "multivpn.$profile.ike_mode" || echo vip)
+    vip=$(timeout -k 2 5 swanctl --list-sas --ike "apc-$profile" 2>/dev/null | sed -n 's/^  local .* \[\([0-9.]*\)\]$/\1/p' | head -1)
+    [ "$mode" = site-to-site ] || [ -n "$vip" ] || return 1
+    PLUTO_VERB=up-client PLUTO_MY_SOURCEIP4_1="$vip" /usr/bin/multivpn-updown "$profile"
+}
+connection_hash(){ sed '/^[[:space:]]*start_action[[:space:]]*=/d' "$1" | sha256sum | cut -d ' ' -f 1; }
+
+apply_profile(){
+    id=$1
+    [ -z "$selected" ] || [ "$id" = "$selected" ] || return 0
+    field type type; field iface interface; field zone zone; field localnet local_subnet; field remotenet remote_subnet; field enabled enabled 0; field mode mode marm-only; field localzone local_zone lan; field gateway default_gateway 0
+    previous_enabled=$enabled
+    ike_changed=1
+    firewallremote=$remotenet; [ "$gateway" != 1 ] || firewallremote=0.0.0.0/0
+    if [ "$action" = start ] && [ "$type" = ikev2 ] && [ -d /sys/module/crypto_safexcel ]; then echo 'IKE wymaga zaplanowanego restartu: crypto_safexcel jest nadal załadowany. Profil zapisany, połączenie nie zostało uruchomione.' >&2; return 1; fi
+    if [ "$action" = stop ]; then
+        uci set "multivpn.$id.enabled=0"
+        if [ "$type" = ikev2 ] && [ ! -d /sys/module/crypto_safexcel ]; then timeout -k 2 10 swanctl --terminate --ike "apc-$id" || true; fi
+        ifdown "$iface" || true
+        enabled=0
+    elif [ "$action" = start ]; then enabled=1; uci set "multivpn.$id.enabled=1"; fi
+    reverse=0; [ "$mode" != both ] || reverse=1
+    if [ "$type" != existing ]; then
+        uci set "firewall.$zone=zone"; uci set "firewall.$zone.name=$zone"; uci set "firewall.$zone.network=$iface"; uci set "firewall.$zone.input=REJECT"; uci set "firewall.$zone.output=ACCEPT"; uci set "firewall.$zone.forward=REJECT"; uci set "firewall.$zone.mtu_fix=1"
+    fi
+    if [ "$type" = ikev2 ]; then
+        field server server; field remoteid remote_id; field cert cert; field ca ca; field key key; field ifid ifid
+        field authmode auth_mode pubkey
+        localauth="auth = pubkey
+   certs = $cert"
+        if [ "$authmode" = eap-mschapv2 ]; then
+            field username username; field password password
+            localauth="auth = eap-mschapv2
+   id = $username
+   eap_id = $username"
+        fi
+        field ikemode ike_mode vip; vipline='vips = 0.0.0.0'; localts=dynamic
+        if [ "$ikemode" = site-to-site ]; then vipline=''; localts=$localnet; fi
+        auto=$enabled; [ ! -d /sys/module/crypto_safexcel ] || auto=0
+        uci set "network.$iface=interface"; uci set "network.$iface.proto=xfrm"; uci set "network.$iface.ifid=$ifid"; uci set "network.$iface.tunlink=wan"; uci set "network.$iface.mtu=1320"; uci set "network.$iface.auto=$auto"
+        uci set "firewall.$zone=zone"; uci set "firewall.$zone.name=$zone"; uci set "firewall.$zone.network=$iface"; uci set "firewall.$zone.input=REJECT"; uci set "firewall.$zone.output=ACCEPT"; uci set "firewall.$zone.forward=REJECT"; uci set "firewall.$zone.mtu_fix=1"
+        start=none; [ "$auto" = 0 ] || start=start
+        [ "$action" != start ] || start=none
+        mkdir -p /etc/swanctl/conf.d
+        cat > "/etc/swanctl/conf.d/apc-$id.conf.next" <<EOF
+connections {
+ apc-$id {
+  version = 2
+  local_addrs = %any
+  remote_addrs = $server
+  $vipline
+  proposals = aes256-sha256-modp2048,aes256-sha256-ecp256,default
+  fragmentation = yes
+  send_cert = always
+  dpd_delay = 30s
+  mobike = yes
+  if_id_in = $ifid
+  if_id_out = $ifid
+  local { $localauth
+  }
+  remote { auth = pubkey
+   id = $remoteid
+   cacerts = $ca
+  }
+  children { apc-$id-lan {
+   local_ts = $localts
+   remote_ts = $firewallremote
+   esp_proposals = aes256-sha256,aes128-sha256,default
+   hw_offload = no
+   start_action = $start
+   close_action = none
+   dpd_action = restart
+   updown = /usr/bin/multivpn-updown $id
+  } }
+ }
+}
+EOF
+        if [ "$authmode" = eap-mschapv2 ]; then
+            escaped=$(printf '%s' "$password" | sed 's/\\/\\\\/g;s/"/\\"/g')
+            printf '\nsecrets { eap-apc-%s { id = %s\n secret = "%s"\n} }\n' "$id" "$username" "$escaped" >> "/etc/swanctl/conf.d/apc-$id.conf.next"
+        fi
+        chmod 600 "/etc/swanctl/conf.d/apc-$id.conf.next"
+        if [ -f "/etc/swanctl/conf.d/apc-$id.conf" ] && [ "$(connection_hash "/etc/swanctl/conf.d/apc-$id.conf")" = "$(connection_hash "/etc/swanctl/conf.d/apc-$id.conf.next")" ]; then ike_changed=0; fi
+        printf '%s\n' "$ike_changed" > "$tmp.$id.changed"
+        mv "/etc/swanctl/conf.d/apc-$id.conf.next" "/etc/swanctl/conf.d/apc-$id.conf"
+    elif [ "$type" = sstp ]; then
+        field server server; field username username; field password password; field ca ca
+        uci set "network.$iface=interface"; uci set "network.$iface.proto=sstp"; uci set "network.$iface.server=$server"; uci set "network.$iface.username=$username"; uci set "network.$iface.password=$password"; uci set "network.$iface.sstp_options=--ca-cert $ca"; uci set "network.$iface.defaultroute=0"; uci set "network.$iface.peerdns=0"; uci set "network.$iface.ipv6=0"; uci set "network.$iface.mtu=1320"; uci set "network.$iface.auto=$enabled"
+        uci set "network.apcvpn_${id}_route=route"; uci set "network.apcvpn_${id}_route.interface=$iface"; uci set "network.apcvpn_${id}_route.target=$remotenet"
+        # A client SSTP session needs return routing on the remote router, or SNAT locally.
+        uci set "firewall.$zone.masq=1"; uci set "firewall.$zone.masq_src=$localnet"; uci set "firewall.$zone.masq_dest=$remotenet"
+    else
+        uci set "network.$iface.auto=$enabled"
+        # Replace the earlier Zacisze direction controls with the named profile rules.
+        if [ "$id" = zacisze ]; then uci set firewall.zacisze_to_lan.enabled=0; uci set firewall.zacisze_input.enabled=0; fi
+    fi
+    field mobile mobile_access 1
+    mobilezone=$(ucode /usr/share/multivpn-connect/mobile.uc zone)
+    mobilenets=$(ucode /usr/share/multivpn-connect/mobile.uc networks)
+    uci -q delete "firewall.apcvpn_${id}_mobile" || true
+    if [ "$mobile" = 1 ] && [ -n "$mobilenets" ]; then
+        uci set "firewall.apcvpn_${id}_mobile=rule"; uci set "firewall.apcvpn_${id}_mobile.name=VPN $id phone to remote"; uci set "firewall.apcvpn_${id}_mobile.src=$mobilezone"; uci set "firewall.apcvpn_${id}_mobile.dest=$zone"; uci set "firewall.apcvpn_${id}_mobile.dest_ip=$remotenet"; uci set "firewall.apcvpn_${id}_mobile.proto=all"; uci set "firewall.apcvpn_${id}_mobile.target=ACCEPT"
+        for net in $mobilenets; do uci add_list "firewall.apcvpn_${id}_mobile.src_ip=$net"; done
+    fi
+    uci set "firewall.apcvpn_${id}_out=rule"; uci set "firewall.apcvpn_${id}_out.name=VPN $id MARM to remote"; uci set "firewall.apcvpn_${id}_out.src=$localzone"; uci set "firewall.apcvpn_${id}_out.dest=$zone"; uci set "firewall.apcvpn_${id}_out.src_ip=$localnet"; uci set "firewall.apcvpn_${id}_out.dest_ip=$firewallremote"; uci set "firewall.apcvpn_${id}_out.proto=all"; uci set "firewall.apcvpn_${id}_out.target=ACCEPT"
+    uci set "firewall.apcvpn_${id}_in=rule"; uci set "firewall.apcvpn_${id}_in.name=VPN $id remote to MARM"; uci set "firewall.apcvpn_${id}_in.src=$zone"; uci set "firewall.apcvpn_${id}_in.dest=$localzone"; uci set "firewall.apcvpn_${id}_in.src_ip=$remotenet"; uci set "firewall.apcvpn_${id}_in.dest_ip=$localnet"; uci set "firewall.apcvpn_${id}_in.proto=all"; uci set "firewall.apcvpn_${id}_in.target=ACCEPT"; uci set "firewall.apcvpn_${id}_in.enabled=$reverse"
+    uci set "firewall.apcvpn_${id}_router=rule"; uci set "firewall.apcvpn_${id}_router.name=VPN $id remote to router"; uci set "firewall.apcvpn_${id}_router.src=$zone"; uci set "firewall.apcvpn_${id}_router.src_ip=$remotenet"; uci set "firewall.apcvpn_${id}_router.dest_ip=$localnet"; uci set "firewall.apcvpn_${id}_router.proto=all"; uci set "firewall.apcvpn_${id}_router.target=ACCEPT"; uci set "firewall.apcvpn_${id}_router.enabled=$reverse"
+}
+config_foreach apply_profile vpn
+/usr/bin/multivpn-ike-server
+uci commit multivpn; uci commit network
+fw4 check >/dev/null
+uci commit firewall
+ubus call network reload >/dev/null
+/etc/init.d/firewall reload >/dev/null
+for id in $(jsonfilter -i "$tmp" -e '@[*].id'); do
+    [ -z "$selected" ] || [ "$id" = "$selected" ] || continue
+    type=$(uci -q get "multivpn.$id.type"); iface=$(uci -q get "multivpn.$id.interface")
+    enabled=$(uci -q get "multivpn.$id.enabled")
+    if [ "$type" = ikev2 ] && [ "$enabled" = 1 ] && [ ! -d /sys/module/crypto_safexcel ]; then
+        ifup "$iface"
+        ready=0
+        for attempt in 1 2 3 4 5; do
+            if [ "$(ubus call "network.interface.$iface" status 2>/dev/null | jsonfilter -e '@.up')" = true ]; then ready=1; break; fi
+            sleep 1
+        done
+        [ "$ready" = 1 ] || { echo "Interfejs $iface nie został utworzony; nie inicjuję IKE." >&2; exit 1; }
+        ike_changed=$(cat "$tmp.$id.changed")
+        if ike_child_up "$id"; then
+            if [ "$ike_changed" = 0 ]; then ike_restore_path "$id"; echo "VPN $id jest już połączony; zachowano działający tunel."; continue; fi
+            echo "Zmieniono konfigurację IKE $id; ponowne zestawienie wyłącznie tego profilu."
+            timeout -k 2 10 swanctl --terminate --ike "apc-$id" >/dev/null
+        fi
+        # --file in conf.d changes the credential base directory; load from the main config.
+        timeout -k 2 10 swanctl --load-creds --noprompt >/dev/null
+        timeout -k 2 10 swanctl --load-conns --file /etc/swanctl/swanctl.conf >/dev/null
+        if [ "$action" = start ]; then
+            if timeout -k 2 22 swanctl --initiate --ike "apc-$id" --child "apc-$id-lan" --timeout 20; then :; else
+                result=$?
+                if ike_child_up "$id"; then ike_restore_path "$id"; echo "Istniejący tunel $id jest zestawiony; zachowano go po odrzuceniu ponownej inicjacji."; continue; fi
+                uci set "multivpn.$id.enabled=$previous_enabled"; uci set "network.$iface.auto=$previous_enabled"; uci commit multivpn; uci commit network
+                timeout -k 2 5 swanctl --terminate --ike "apc-$id" >/dev/null 2>&1 || true
+                ifdown "$iface" >/dev/null 2>&1 || true
+                echo 'IKE nie zostało zestawione; poprzedni autostart został przywrócony.' >&2
+                exit "$result"
+            fi
+        fi
+    fi
+    if [ "$action" = start ] && [ "$type" != ikev2 ]; then ifup "$iface"; fi
+done
+if [ ! -d /sys/module/crypto_safexcel ]; then timeout -k 2 10 swanctl --load-conns --file /etc/swanctl/swanctl.conf >/dev/null; fi
+mkdir -p /etc/multivpn-connect
+ucode -e 'import {cursor} from "uci"; let c=cursor();c.foreach("multivpn","vpn",p=>printf("%s %s %s %s\n",p[".name"],p.type,p.interface,p.zone));' > /etc/multivpn-connect/vpn-managed.next
+mv /etc/multivpn-connect/vpn-managed.next /etc/multivpn-connect/vpn-managed
+/usr/bin/multivpn-gateway
+/usr/bin/multivpn-mobile
+echo 'Profile VPN zapisane; kierunki firewalla zastosowane.'

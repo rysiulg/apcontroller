@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+[ -s /etc/apcontroller/zacisze-api.auth ] || exit 0
+ip route get 192.168.88.1 2>/dev/null | grep -q 'dev sstp-zacisze ' || exit 0
+umask 077
+exec 8>/tmp/apcontroller-dhcp-zacisze.lock
+flock -n 8 || exit 0
+if [ "${1:-}" != force ] && [ -s /etc/apcontroller/dhcp-zacisze.json ]; then
+    updated=$(jsonfilter -i /etc/apcontroller/dhcp-zacisze.json -e '@.updated_at')
+    case "$updated" in ''|*[!0-9]*) updated=0;; esac
+    [ "$(( $(date +%s) - updated ))" -ge 300 ] || exit 0
+fi
+tmp=$(mktemp /etc/apcontroller/dhcp-zacisze.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+ucode /usr/share/apcontroller/lib/dhcp-zacisze.uc > "$tmp"
+mv "$tmp" /etc/apcontroller/dhcp-zacisze.json

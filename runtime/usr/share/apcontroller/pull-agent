@@ -1,0 +1,45 @@
+#!/bin/sh
+set -e
+umask 077
+state=/etc/apcontroller/pull
+[ -f "$state/client.conf" ] || exit 0
+. "$state/client.conf"
+if ! mkdir /tmp/apcontroller-pull.lock 2>/dev/null; then
+ owner=$(cat /tmp/apcontroller-pull.lock/pid 2>/dev/null || true)
+ case "$owner" in ''|*[!0-9]*) exit 75;;esac
+ kill -0 "$owner" 2>/dev/null && exit 75
+ rm -f /tmp/apcontroller-pull.lock/pid;rmdir /tmp/apcontroller-pull.lock;mkdir /tmp/apcontroller-pull.lock || exit 75
+fi
+printf '%s\n' "$$" > /tmp/apcontroller-pull.lock/pid
+work=$(mktemp -d /tmp/apc-pull.XXXXXX)
+finish_pull(){ code=$?;[ "$code" = 0 ] || logger -t apcontroller-pull "Nie zastosowano konfiguracji; kod $code";rm -rf "$work";rm -f /tmp/apcontroller-pull.lock/pid;rmdir /tmp/apcontroller-pull.lock; }
+trap finish_pull EXIT
+trap 'exit 143' TERM HUP INT
+# procd may inherit HOME=/; use the account's real home from passwd for host pins.
+(unset HOME;exec dbclient -o BatchMode=yes -o StrictHostKeyChecking=yes -T -K 15 -I 45 -p "${PORT:-22}" -i "$state/client.key" "root@$MAIN") < /dev/null > "$work/bundle.tar" 2> "$work/ssh.log" & connection=$!
+(sleep 45 & timer=$!;trap 'kill "$timer" 2>/dev/null || true;exit 0' TERM HUP INT;wait "$timer";kill "$connection" 2>/dev/null || true) < /dev/null > /dev/null 2>&1 & watchdog=$!
+code=0;wait "$connection" || code=$?;kill "$watchdog" 2>/dev/null || true;wait "$watchdog" 2>/dev/null || true
+[ "$code" = 0 ] || { cat "$work/ssh.log" >&2;exit 1; }
+tar -tf "$work/bundle.tar" > "$work/files"
+while IFS= read -r name; do case "$name" in payload|setconfig|vlan.sh|apply.sh|REVISION|apcontroller.user|apcontroller-agent-as) ;;*) echo 'Nieprawidłowy plik w paczce konfiguracji' >&2;exit 2;;esac;done < "$work/files"
+tar -xf "$work/bundle.tar" -C "$work"
+revision=$(cat "$work/REVISION")
+printf '%s' "$revision" | grep -Eq '^[a-f0-9]{64}$' || exit 2
+fields='payload setconfig vlan.sh apply.sh'
+[ ! -f "$work/apcontroller.user" ] || fields="$fields apcontroller.user apcontroller-agent-as"
+actual=$(cd "$work";sha256sum $fields | sha256sum | cut -d ' ' -f1)
+[ "$actual" = "$revision" ] || { echo 'Nieprawidłowa suma konfiguracji' >&2;exit 2; }
+[ ! -f "$state/applied" ] || [ "$(cat "$state/applied")" != "$revision" ] || exit 0
+[ -z "${APC_PREFLIGHT:-}" ] || { APC_PREFLIGHT=1 sh "$work/setconfig" "$work/payload";exit; }
+APC_PREFLIGHT=1 sh "$work/setconfig" "$work/payload"
+cp "$work/bundle.tar" "$state/current.next";mv "$state/current.next" "$state/current.tar"
+mkdir -p "$state/before-apply";cp /etc/config/network "$state/before-apply/network";cp /etc/config/wireless "$state/before-apply/wireless"
+if ! sh "$work/apply.sh"; then
+ uci -q revert network || true;uci -q revert wireless || true
+ cp "$state/before-apply/network" /etc/config/network;cp "$state/before-apply/wireless" /etc/config/wireless
+ /etc/init.d/network reload || true;wifi reload || true
+ echo 'Nie zastosowano nowej wersji; przywrócono network/wireless' >&2;exit 1
+fi
+printf '%s\n' "$revision" > "$state/applied.next";mv "$state/applied.next" "$state/applied"
+touch "$state/migrated"
+logger -t apcontroller-pull "Zastosowano konfigurację ${revision%????????????????????????????????????????????????????}"

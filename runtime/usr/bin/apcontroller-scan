@@ -1,0 +1,53 @@
+#!/bin/sh
+set -e
+action=${1:-report}; scope=${2:-}; dir=/etc/apcontroller/scanner
+umask 077
+mkdir -p "$dir"
+case "$action" in
+ report) exec ucode /usr/share/apcontroller/lib/scanner.uc report "$dir";;
+ start) case "$scope" in ''|*[!0-9./]*) exit 2;; esac
+  ucode /usr/share/apcontroller/lib/scanner.uc targets "$dir" "$scope" >/dev/null
+  if [ -f "$dir/pid" ] && kill -0 "$(cat "$dir/pid")" 2>/dev/null && grep -q 'apcontroller-scan' "/proc/$(cat "$dir/pid")/cmdline"; then echo 'Skanowanie już trwa'; exit 0; fi
+  : > "$dir/log"; start-stop-daemon -S -b -m -p "$dir/pid" -x "$0" -- _run "$scope"
+  echo 'Skanowanie rozpoczęte'; exit 0;;
+ _run) exec > "$dir/log" 2>&1 < /dev/null;;
+ *) exit 2;;
+esac
+exec 9>/tmp/apcontroller-scan.lock
+flock -n 9 || exit 0
+tmp=$(mktemp -d /tmp/apcontroller-scan.XXXXXX)
+finish_scan(){
+ code=$?
+ if [ "$code" != 0 ]; then printf '%s' '{"running":false,"hosts":[],"updated":0,"error":"Skanowanie nie powiodło się; sprawdź raport backendu"}' > "$dir/result.json"; fi
+ rm -f "$dir/pid"; rm -rf "$tmp"
+}
+trap finish_scan EXIT
+printf '{"running":true,"hosts":[],"updated":0}' > "$dir/result.json"
+ucode /usr/share/apcontroller/lib/scanner.uc targets "$dir" "$scope" > "$tmp/targets"
+mkdir -p "$tmp/alive"
+count=0
+while IFS= read -r ip; do (if ping -c 1 -W 1 "$ip" >/dev/null 2>&1; then printf '%s\n' "$ip" > "$tmp/alive/$ip"; fi) & count=$((count+1)); [ "$((count%16))" != 0 ] || wait; done < "$tmp/targets"
+wait
+find "$tmp/alive" -type f -exec cat '{}' ';' > "$dir/alive.txt"
+ubus call apcontroller status > "$dir/status.json"
+{ cat /proc/net/arp; ip -4 neigh show; } | sed 's/^/router /' > "$dir/neighbors.txt"
+APC_STANDALONE=1
+. /usr/share/apcontroller/lib/ssh.sh
+. /lib/functions.sh
+config_load apcontroller
+count=0
+collect_ap(){
+ local id="$1" ip port username password key use enabled platform path
+ config_get enabled "$id" enabled 1; [ "$enabled" = 1 ] || return 0
+ config_get ip "$id" ipaddr; config_get platform "$id" platform; path=$(uci -q get apcontroller.@global[0].path || echo /tmp/apcontroller)
+ [ -n "$platform" ] || platform=$(cat "$path/$ip-$id.platform" 2>/dev/null || true)
+ case "$platform" in openwrt|ubiquiti) ;; *) return 0;; esac
+ config_get port "$id" port 22; config_get username "$id" username; config_get password "$id" password; config_get key "$id" keyfile; config_get use "$id" usekeyfile 0
+ ( [ "$platform" != ubiquiti ] || APC_SSH_LEGACY=1; apc_ssh_exec "$ip" "$port" "$username" "$password" "$key" "$use" 'cat /proc/net/arp; ip -4 neigh show 2>/dev/null; iface=br0; [ ! -f /etc/openwrt_release ] || iface=$(uci -q get network.lan.device || uci -q get network.lan.ifname); case "$iface" in ""|*[!a-zA-Z0-9_.:-]*) exit 0;; esac; if command -v tcpdump >/dev/null; then tcpdump -l -nne -i "$iface" "arp and net 169.254.0.0/16" 2>/dev/null & p=$!; sleep 6; kill $p 2>/dev/null; wait $p 2>/dev/null || true; fi' > "$tmp/$id.raw" 2>"$tmp/$id.error" || true; sed "s/^/$ip /" "$tmp/$id.raw" > "$tmp/$id.neighbors") &
+ count=$((count+1)); [ "$((count%4))" != 0 ] || wait
+}
+config_foreach collect_ap host
+wait
+for f in "$tmp"/*.neighbors; do [ ! -f "$f" ] || cat "$f" >> "$dir/neighbors.txt"; done
+ucode /usr/share/apcontroller/lib/scanner.uc build "$dir" "$scope"
+mv "$dir/result.json.next" "$dir/result.json"

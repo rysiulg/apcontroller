@@ -1,0 +1,8 @@
+#!/bin/sh
+set -e
+umask 077
+mkdir -p /etc/apcontroller/desired
+chmod 700 /etc/apcontroller/desired
+exec 9>/tmp/apcontroller-desired.lock
+flock -n 9 || { echo 'Trwa publikowanie konfiguracji AP' >&2;exit 1; }
+exec ucode /usr/share/apcontroller/lib/desired.uc "${1:-publish}" "${2:-}"

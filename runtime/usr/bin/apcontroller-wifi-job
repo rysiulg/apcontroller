@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+umask 077
+action=${1:-report};group=${2:-};targets=${3:-};dir=/etc/apcontroller/wifi-jobs
+mkdir -p "$dir"
+case "$group" in ''|*[!a-zA-Z0-9_]*) [ "$action" = report ] || exit 2;; esac
+case "$targets" in *[!a-zA-Z0-9_,]*) exit 2;; esac
+case "$action" in
+ report) ucode -e 'import {readfile} from "fs";let d="/etc/apcontroller/wifi-jobs",s=readfile(d+"/result");printf("%J\n",{done:!!s,code:s?int(trim(s)):null,output:readfile(d+"/log")||"Brak operacji"});';exit;;
+ start|check)
+  if [ -s "$dir/pid" ] && kill -0 "$(cat "$dir/pid")" 2>/dev/null && grep -q 'apcontroller-wifi-job' "/proc/$(cat "$dir/pid")/cmdline"; then echo 'Wysyłanie Wi-Fi już trwa' >&2;exit 1;fi
+  rm -f "$dir/result";: > "$dir/log";start-stop-daemon -S -b -m -p "$dir/pid" -x "$0" -- _run "$group" "$targets" "$action";echo 'Operacja rozpoczęta';exit;;
+ _run) exec > "$dir/log" 2>&1 < /dev/null;;
+ *) exit 2;;
+esac
+exec 9>/tmp/apcontroller-wifi-job.lock
+finish_wifi_job(){ code=$?;printf '%s\n' "$code" > "$dir/result";rm -f "$dir/pid"; }
+trap finish_wifi_job EXIT
+flock -n 9 || { echo "Trwa inne zadanie Wi-Fi" >&2;exit 1; }
+/usr/bin/apcontroller-dispatch-wifi "${4:-start}" "$group" "$targets"

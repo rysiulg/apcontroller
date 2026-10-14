@@ -1,0 +1,53 @@
+#!/bin/sh
+set -e
+action=${1:-list}; dir=/etc/apcontroller/scripts
+umask 077
+mkdir -p "$dir"
+case "$action" in
+ list|report) for file in /scripts/*.sh; do [ ! -f "$file" ] || sha256sum "$file"; done > "$dir/local.sha256"; exec ucode /usr/share/apcontroller/lib/scripts.uc list;;
+ preview) exec ucode /usr/share/apcontroller/lib/scripts.uc preview "${2:-}";;
+ check|update)
+  if [ -f "$dir/pid" ] && kill -0 "$(cat "$dir/pid")" 2>/dev/null && grep -q 'apcontroller-scripts' "/proc/$(cat "$dir/pid")/cmdline"; then echo 'Operacja skryptów już trwa'; exit 1; fi
+  rm -f "$dir/result"
+  : > "$dir/log"; start-stop-daemon -S -b -m -p "$dir/pid" -x "$0" -- _run "$action"
+  echo 'Operacja rozpoczęta'; exit 0;;
+ _run) exec > "$dir/log" 2>&1 < /dev/null; action=${2:-}; case "$action" in check|update) ;; *) exit 2;; esac;;
+ *) exit 2;;
+esac
+exec 9>/tmp/apcontroller-scripts.lock
+flock -n 9 || exit 1
+tmp=$(mktemp -d /tmp/apcontroller-scripts.XXXXXX)
+finish_scripts(){ code=$?; printf '%s\n' "$code" > "$dir/result"; rm -f "$dir/pid"; rm -rf "$tmp"; }
+trap finish_scripts EXIT
+[ -f /scripts/env.sh ] || { echo 'Brak lokalnego /scripts/env.sh'; exit 2; }
+. /scripts/env.sh
+server=${SERVER_SCRIPTS:-}
+case "$server" in https://*) ;; *) echo 'Źródło skryptów musi używać HTTPS'; exit 2;; esac
+[ -n "${TOKEN:-}" ] || { echo 'Brak tokenu NAS w lokalnym env.sh'; exit 2; }
+curl -fsS --connect-timeout 10 --max-time 30 -H "Authorization: Bearer $TOKEN" "$server?list=1" -o "$tmp/manifest"
+while IFS='|' read -r name expected size stamp; do
+ case "$name" in sync_scripts_from_nas.sh|sync-wireless-smart.sh|autoupdate.sh|autoupdate-notify.sh|99-dhcp-fallback.sh|update-hostname.sh|make_backup_usb.sh|fail2ban_sources.sh) ;; *) continue;; esac
+ [ "$name" != make_backup_usb.sh ] || [ ! -f /etc/autobackup.disabled ] || { echo "$name: pominięty — autobackup wyłączony"; continue; }
+ printf '%s' "$expected" | grep -Eq '^[a-f0-9]{64}$' || { echo "$name: nieprawidłowa suma NAS"; exit 2; }
+ curl -fsS --connect-timeout 10 --max-time 30 -H "Authorization: Bearer $TOKEN" "$server?file=$name" -o "$tmp/$name"
+ actual=$(sha256sum "$tmp/$name" | cut -d ' ' -f 1)
+ [ "$actual" = "$expected" ] || { echo "$name: niezgodna suma — plik odrzucony"; exit 2; }
+ sh -n "$tmp/$name" || { echo "$name: błąd składni — aktualizacja zatrzymana"; exit 2; }
+ echo "$name: SHA256 i składnia OK"
+done < "$tmp/manifest"
+cp "$tmp/manifest" "$dir/manifest"
+if [ "$action" = update ]; then
+ backup=/etc/apcontroller/scripts-backup/$(date +%Y%m%d-%H%M%S)
+ mkdir -p "$backup"
+ for file in "$tmp"/*.sh; do
+  [ -f "$file" ] || continue
+  name=${file##*/}; target=/scripts/$name
+  [ ! -L "$target" ] || { echo "$name: cel jest linkiem symbolicznym"; exit 2; }
+  [ ! -f "$target" ] || [ "$(sha256sum "$target" | cut -d ' ' -f 1)" != "$(sha256sum "$file" | cut -d ' ' -f 1)" ] || { echo "$name: bez zmian"; continue; }
+  [ ! -f "$target" ] || cp -p "$target" "$backup/$name"
+  cp "$file" "$target.next"; chmod 755 "$target.next"; mv "$target.next" "$target"
+  echo "$name: plik zaktualizowany; nie został uruchomiony"
+ done
+ for path in /scripts/ /etc/apcontroller/; do grep -qxF "$path" /etc/sysupgrade.conf || echo "$path" >> /etc/sysupgrade.conf; done
+fi
+echo 'Gotowe. Nie zmieniono sieci, cronów ani firmware.'

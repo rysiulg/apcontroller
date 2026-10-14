@@ -1,0 +1,16 @@
+const assert=require('node:assert/strict'),fs=require('node:fs');
+const source=fs.readFileSync('runtime/www/luci-static/resources/view/apcontroller/apcontroller.js','utf8');
+const helpers=source.slice(source.indexOf('\t\tfunction ipv4('),source.indexOf('\n\t\tfunction updateDeviceStatus('));
+const E=(tag,attrs,children)=>({tag,attrs,children});
+const uci={get:()=>['10.48.18.0/24'],sections:()=>[{remote_subnet:'192.168.88.0/22'}]},L={toArray:x=>Array.isArray(x)?x:[x]};
+const {ipv4,inSubnet,subnetTag,clientSummary}=new Function('E','uci','L',helpers+'return {ipv4,inSubnet,subnetTag,clientSummary};')(E,uci,L);
+assert.equal(ipv4('300.1.2.3'),null);assert.equal(ipv4('10.48.18'),null);
+assert.equal(inSubnet('192.168.91.255','192.168.88.0/22'),true);assert.equal(inSubnet('192.168.92.0','192.168.88.0/22'),false);
+assert.equal(inSubnet('10.48.18.255','10.48.18.0/24'),true);assert.equal(inSubnet('10.48.19.0','10.48.18.0/24'),false);
+assert.equal(subnetTag('10.48.18.12'),null);assert.equal(subnetTag('brak IP'),null);
+assert.equal(subnetTag('192.168.91.4').label,'192.168.88.0/22');assert.equal(subnetTag('192.168.88.12').color,subnetTag('192.168.91.4').color);
+assert.equal(subnetTag('10.48.18.12<br>192.168.32.6').label,'192.168.32.0/24');
+const cards=clientSummary([{band:2,mac:'aa:bb'},{band:5,mac:'AA:BB'},{band:2,mac:'cc:dd'}]).children;
+assert.deepEqual(cards.map(c=>c.children[1].children),['3','2','1','0','2']);
+assert.deepEqual(clientSummary([]).children.map(c=>c.children[1].children),['0','0','0','0','0']);
+console.log('PASS: subnet boundaries, remote colors, association totals and unique MAC counts');

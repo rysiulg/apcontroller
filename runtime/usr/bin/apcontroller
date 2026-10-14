@@ -1,0 +1,20 @@
+#!/bin/sh
+
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+
+BASEFOLDER="${BASEFOLDER:-/usr/share/apcontroller}"
+LIBFOLDER="${BASEFOLDER}/lib"
+
+. "${LIBFOLDER}/rpc.sh"
+. /lib/functions.sh
+
+exec 9>"${BASEPATH}.poll.lock"
+flock -n 9 || exit 0
+/usr/bin/apcontroller-dhcp-zacisze >/dev/null 2>&1 || true
+config_load apcontroller
+
+config_foreach \
+	get_data_from_host \
+	host
+
+exit 0

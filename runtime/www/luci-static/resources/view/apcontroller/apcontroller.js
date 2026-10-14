@@ -1,0 +1,3130 @@
+'use strict';
+
+'require dom';
+'require form';
+'require fs';
+'require poll';
+'require rpc';
+'require uci';
+'require ui';
+'require view';
+const apcCommitRPC=rpc.declare({object:'uci',method:'commit',params:['config'],reject:true});
+async function apcCommit(config,publish=true){
+ if(config==='apcontroller'){const valid=new Set(uci.sections('apcontroller','wifi').map(w=>w['.name']));for(const g of uci.sections('apcontroller','group')){if(g.managed_wifi&&!valid.has(g.managed_wifi)){uci.remove('apcontroller',g['.name']);continue;}const refs=L.toArray(g.wifi).filter(id=>valid.has(id));if(refs.length)uci.set('apcontroller',g['.name'],'wifi',refs);else uci.unset('apcontroller',g['.name'],'wifi');}await uci.save();}
+ await apcCommitRPC(config);if(config==='apcontroller'&&publish&&uci.sections('apcontroller','global')[0]?.pull_auto_publish!=='0'){const r=await fs.exec('/usr/bin/apcontroller-desired',['publish']);if(r.code)throw new Error(r.stderr||r.stdout);}
+}
+
+let callHostHints;
+let callAPControllerActivity;
+let callAPControllerScripts;
+let callAPController;
+
+const additionalScriptFile = '/usr/share/apcontroller/apcontroller.user';
+let additionalScript = '';
+
+callHostHints = rpc.declare({
+	object: 'luci-rpc',
+	method: 'getHostHints',
+	expect: { '': {} }
+});
+
+callAPControllerActivity = rpc.declare({
+	object: 'apcontroller',
+	method: 'activity',
+	params: ['section'],
+	expect: { '': {} }
+});
+
+callAPControllerScripts = rpc.declare({
+	object: 'apcontroller',
+	method: 'scripts',
+	expect: { '': {} }
+});
+
+callAPController = rpc.declare({
+	object: 'apcontroller',
+	method: 'status',
+	expect: { '': {} }
+});
+
+function scriptsToolbar(){
+ const summary=E('span',{},'Ładowanie…'),table=E('div'),log=E('pre',{style:'white-space:pre-wrap'}),details=E('details',{},[E('summary',{},'Szczegóły operacji'),log]);let busy=false;
+ const preview=async name=>{try{const r=await fs.exec('/usr/bin/apcontroller-scripts',['preview',name]);if(r.code)throw new Error(r.stderr||r.stdout);const data=JSON.parse(r.stdout);ui.showModal(name,[E('pre',{style:'white-space:pre-wrap;max-height:60vh;overflow:auto'},data.text),E('button',{type:'button',class:'cbi-button',click:ui.hideModal},'Zamknij')]);}catch(e){summary.textContent=e.message;}};
+ const refresh=async()=>{const r=await fs.exec('/usr/bin/apcontroller-scripts',['report']);if(r.code)throw new Error(r.stderr||r.stdout);const data=JSON.parse(r.stdout);table.replaceChildren(E('table',{class:'table'},[E('tr',{},['Skrypt','Przeznaczenie','Stan',''].map(v=>E('th',{},v))),...data.rows.map(row=>E('tr',{},[E('td',{},row.name),E('td',{},row.description),E('td',{},row.state),E('td',{},E('button',{type:'button',class:'cbi-button',click:()=>preview(row.name)},'Podgląd'))]))]));log.textContent=data.output;return data;};
+ const run=async action=>{if(busy)return;busy=true;summary.textContent=action==='check'?'Sprawdzanie NAS…':'Pobieranie plików…';try{const r=await fs.exec('/usr/bin/apcontroller-scripts',[action]);if(r.code)throw new Error(r.stderr||r.stdout);for(let i=0;i<150;i++){await new Promise(resolve=>setTimeout(resolve,2000));const data=await refresh();if(data.done){summary.textContent=data.code?'Operacja zakończona błędem — rozwiń szczegóły':'Gotowe';return;}}summary.textContent='Operacja trwa — status po ponownym otwarciu';}catch(e){summary.textContent=e.message;}finally{busy=false;}};
+ refresh().then(d=>summary.textContent=d.done?(d.code?'Poprzednia operacja: błąd':'Poprzednia operacja: OK'):'Pliki lokalne').catch(e=>summary.textContent=e.message);
+ return E('details',{class:'apc-scripts'},[E('summary',{},'Skrypty z NAS'),E('p',{},'Sprawdzenie sum SHA256 i składni. Aktualizacja zapisuje pliki i ich poprzednie wersje; uruchamianie skryptów pozostaje oddzielne.'),E('button',{type:'button',class:'cbi-button cbi-button-action',click:()=>run('check')},'Sprawdź NAS'),E('button',{type:'button',class:'cbi-button cbi-button-positive',click:()=>run('update')},'Aktualizuj pliki'),summary,details,table]);
+}
+function backupToolbar(){
+ const status=E('span',{},'Ręczne zbieranie kopii'),log=E('pre',{style:'white-space:pre-wrap'}),details=E('details',{},[E('summary',{},'Szczegóły backupu'),log]);let busy=false;
+ const refresh=async()=>{const r=await fs.exec('/usr/bin/apcontroller-backup',['report']);if(r.code)throw new Error(r.stderr||r.stdout);const data=JSON.parse(r.stdout);log.textContent=data.output;if(data.done)status.textContent=data.code?'Backup zakończony błędem — sprawdź szczegóły':'Backup zapisany na NAS';return data;};
+ const button=E('button',{type:'button',class:'cbi-button cbi-button-positive',click:async()=>{if(busy)return;busy=true;button.disabled=true;try{const r=await fs.exec('/usr/bin/apcontroller-backup',['start']);if(r.code)throw new Error(r.stderr||r.stdout);status.textContent='Zbieranie z głównego routera i włączonych OpenWrt…';for(let i=0;i<300;i++){await new Promise(resolve=>setTimeout(resolve,3000));if((await refresh()).done)break;}}catch(e){status.textContent=e.message;}finally{busy=false;button.disabled=false;}}},'Zbierz backup i wyślij na NAS');refresh().catch(e=>status.textContent=e.message);
+ return E('details',{class:'apc-backups'},[E('summary',{},'Backup głównego routera i AP'),E('p',{},'AP przesyłają kopie przez SSH do głównego routera. Główny dodaje własną kopię, szyfruje paczkę i wysyła ją do NAS. Harmonogram pozostaje wyłączony.'),button,E('button',{type:'button',class:'cbi-button',click:()=>refresh().catch(e=>status.textContent=e.message)},'Odśwież status'),status,details]);
+}
+function subnetNetwork(cidr){
+ const [ip,bitsText]=String(cidr||'').split('/'),bytes=ip.split('.').map(Number),bits=Number(bitsText);if(bytes.length!==4||bytes.some(n=>!Number.isInteger(n)||n<0||n>255)||bitsText==null||!Number.isInteger(bits)||bits<0||bits>32)return null;
+ const value=bytes.reduce((n,b)=>n*256+b,0),base=Math.floor(value/2**(32-bits))*2**(32-bits);return [24,16,8,0].map(n=>(base>>>n)&255).join('.')+'/'+bits;
+}
+function configuredSubnets(){
+ const list=L.toArray(uci.get('apcontroller','@global[0]','native_subnet')||['10.48.18.0/24']);uci.sections('multivpn','vpn').forEach(p=>list.push(...L.toArray(p.remote_subnet)));
+ uci.sections('network','interface').forEach(n=>{const mask=String(n.netmask||'').split('.'),binary=mask.length===4?mask.map(v=>Number(v).toString(2).padStart(8,'0')).join(''):'';const bits=/^1*0*$/.test(binary)&&binary.length===32?binary.replace(/0/g,'').length:null;L.toArray(n.ipaddr).forEach(ip=>{if(ip.includes('/'))list.push(ip);else if(bits!=null)list.push(ip+'/'+bits);});});return [...new Set(list.map(subnetNetwork).filter(Boolean))];
+}
+function addressSubnet(ip,scopes){
+ const value=String(ip||'').split('.').reduce((n,b)=>n*256+Number(b),0);return [...new Set([...configuredSubnets(),...(scopes||[]).map(subnetNetwork).filter(Boolean)])].sort((a,b)=>Number(b.split('/')[1])-Number(a.split('/')[1])).find(c=>{const [base,bits]=c.split('/'),n=base.split('.').reduce((v,b)=>v*256+Number(b),0);return Math.floor(value/2**(32-Number(bits)))===Math.floor(n/2**(32-Number(bits)));})||null;
+}
+function scanToolbar(){
+ const select=E('select',{'aria-label':'Podsieć skanowania'}),summary=E('span',{},'Ładowanie…'),table=E('div'),details=E('details',{},[E('summary',{},'Wyniki skanowania / fallback 169.254'),table]);let busy=false;
+ const order=E('select',{'aria-label':'Sortowanie wyników'},['IP','Nazwa','Ocena'].map(v=>E('option',{value:v},v)));let last=null;order.addEventListener('change',()=>{if(last)display(last);});
+ const ipv4=ip=>String(ip||'').split('.').reduce((v,n)=>v*256+Number(n),0);
+ const sourceCell=source=>{const values=String(source||'').split(/,\s*/).filter(Boolean);if(values.length<2)return E('td',{},values[0]||'—');return E('td',{},E('details',{},[E('summary',{},'Widziało '+values.length+' AP'),E('span',{style:'overflow-wrap:anywhere'},values.join(', '))]));};
+ const display=r=>{last=r;summary.textContent=r.error?r.error:r.running?'Skanowanie w toku…':r.updated?'Znaleziono '+(r.hosts||[]).length+' wpisów · '+new Date(r.updated*1000).toLocaleString():'Jeszcze nie skanowano';if(!select.options.length)(r.scopes||[]).forEach(v=>select.appendChild(E('option',{value:v},v)));
+ const groups=new Map();for(const host of r.hosts||[]){const subnet=addressSubnet(host.ip,r.scopes)||(host.ip.startsWith('169.254.')?'169.254.0.0/16':String(host.ip||'').split('.').slice(0,3).join('.')+'.0/24 (maska nieznana)');if(!groups.has(subnet))groups.set(subnet,[]);groups.get(subnet).push(host);}
+ const sections=[...groups].sort((a,b)=>Number(b[0].startsWith('169.254.'))-Number(a[0].startsWith('169.254.'))||ipv4(a[0].split('/')[0])-ipv4(b[0].split('/')[0])).map(([subnet,hosts])=>{const fallback=subnet.startsWith('169.254.'),native=subnet==='10.48.18.0/24',color=fallback?'#ffe2c5':native?'#e6f3e8':'#e7effb';hosts.sort((a,b)=>order.value==='Nazwa'?String(a.name||'').localeCompare(String(b.name||'')):order.value==='Ocena'?String(a.status||'').localeCompare(String(b.status||'')):ipv4(a.ip)-ipv4(b.ip));return E('details',{open:groups.size===1||fallback},[E('summary',{style:'background:'+color+';padding:.45em;margin-top:.5em'},subnet+' · '+hosts.length+' urządzeń · '+(fallback?'adresy link-local':native?'LAN MARM':'inna podsieć')),E('table',{class:'table'},[E('tr',{},['IP hosta','MAC','Nazwa','Zaobserwowano na AP','Ocena'].map(v=>E('th',{},v))),...hosts.map(h=>E('tr',{},[E('td',{},h.ip||'—'),E('td',{},h.mac||'—'),E('td',{},h.name||'—'),sourceCell(h.source),E('td',{},h.status||'—')]))])]);});
+ table.replaceChildren(E('p',{},r.note||'Brak dzierżawy nie oznacza automatycznie awarii DHCP.'),E('p',{},'Lista AP wskazuje miejsca obserwacji tego samego hosta; nie są to dodatkowe adresy hosta. Kolory: zielony LAN MARM, niebieski inne podsieci, pomarańczowy 169.254.'),order,...sections);
+ };
+ const refresh=async()=>{const r=await fs.exec('/usr/bin/apcontroller-scan',['report']);if(!r.code)try{display(JSON.parse(r.stdout));}catch(e){summary.textContent='Nie udało się odczytać wyników';}};
+ const button=E('button',{type:'button',class:'cbi-button cbi-button-action',click:async()=>{if(busy||!select.value)return;busy=true;button.disabled=true;try{const r=await fs.exec('/usr/bin/apcontroller-scan',['start',select.value]);if(r.code)throw new Error(r.stderr||r.stdout);details.open=true;summary.textContent='Skanowanie rozpoczęte…';for(let i=0;i<60;i++){await new Promise(resolve=>setTimeout(resolve,2000));await refresh();const status=await fs.exec('/usr/bin/apcontroller-scan',['report']);if(!JSON.parse(status.stdout).running)break;}}catch(e){summary.textContent=e.message;}finally{busy=false;button.disabled=false;}}},'Skanuj urządzenia');refresh();return E('div',{'class':'apc-scanner'},[select,button,summary,details]);
+}
+async function saveWiFiForm(option,map){
+ const active=option.map||map;await active.save(null,true);await uci.save();await apcCommit('apcontroller',false);
+}
+async function sendWiFiJob(group,targets,check){
+ if(!targets.length)throw new Error('Wybierz konkretne urządzenia AP.');
+ const status=E('p',{},'Sprawdzanie i wysyłanie…'),log=E('pre',{style:'white-space:pre-wrap;max-height:55vh;overflow:auto'}),details=E('details',{},[E('summary',{},'Szczegóły'),log]);
+ ui.showModal(check?'Sprawdzenie konfiguracji Wi-Fi':'Wysyłanie konfiguracji Wi-Fi',[status,details,E('button',{type:'button',class:'cbi-button',click:ui.hideModal},'Zamknij')]);
+ const started=await fs.exec('/usr/bin/apcontroller-wifi-job',[check?'check':'start',group,targets.join(',')]);if(started.code)throw new Error(started.stderr||started.stdout);
+ for(let i=0;i<150;i++){await new Promise(resolve=>setTimeout(resolve,2000));const r=await fs.exec('/usr/bin/apcontroller-wifi-job',['report']);if(r.code)throw new Error(r.stderr||r.stdout);const data=JSON.parse(r.stdout);log.textContent=data.output;if(data.done){status.textContent=data.code?'Błąd — rozwiń szczegóły':check?'Konfiguracja sprawdzona, bez zmian':'Konfiguracja wysłana';if(data.code)details.open=true;return;}}
+ status.textContent='Operacja trwa. Wynik zostaje zapisany na routerze.';
+}
+function nextFreeSid(name, offset) {
+	let sid = '' + name + offset;
+
+	while (uci.get('apcontroller', sid))
+		sid = '' + name + (++offset);
+
+	return sid;
+}
+
+function lz(n) {
+	return (n < 10 ? '0' : '') + n;
+}
+
+function hostStatus(records, section_id) {
+	let lastContact = -1;
+	let lastContact_ts = -1;
+
+	const obj = records.find(item => item && item.section === section_id);
+	if (obj && obj.verification) return E('span', {title:_('Zapis danych z VPN, odpytywanie wyłączone'),style:'color:#8a6800'},_('Weryfikacja'));
+	if (obj && !obj.enabled) return E('span', { 'style': 'color: gray' }, _('Disabled'));
+
+	if (obj) {
+		lastContact = obj['.lastcontact'];
+		lastContact_ts = obj['lastcontact_ts'];
+	}
+
+	if (lastContact == -1)
+		return E('span', '-');
+
+	const timestamp = new Date().getTime() / 1000;
+	if (obj && obj.online === 0) return E('span', { 'style': 'color: red' }, '● ' + _('Offline'));
+	const interval = uci.get('apcontroller', '@global[0]', 'interval');
+
+	if (!interval)
+		return E('span', { 'style': 'color: gray' }, _('Unknown'));
+
+	if (timestamp - lastContact_ts > parseInt(interval) * 2.5 * 60)
+		return E('span', { 'style': 'color: red' }, '● ' + _('Offline'));
+
+	return E('span', { 'style': 'color: green' }, '● ' + _('Online'));
+}
+
+function hostInfo(key, records, section_id) {
+	const obj = records.find(item => item && item.section === section_id);
+	if (key === 'lastcontact' && obj && obj['.lastcontact'] >= 0) return E('span', { title: obj.lastcontact }, '%s s'.format(obj['.lastcontact']));
+	const data = obj && obj[key] != null && obj[key] !== '' ? obj[key] : '-';
+
+	return E('span', data);
+}
+
+return view.extend({
+
+	load: function() {
+		return Promise.all([
+			callHostHints(),
+			callAPController(),
+			L.resolveDefault(fs.read_direct(additionalScriptFile), ''),
+			uci.load('apcontroller'),
+			L.resolveDefault(uci.load('network'),null),
+			L.resolveDefault(uci.load('multivpn'),null),
+			Promise.resolve(null)
+		]);
+	},
+
+	handleSave: function(ev) { return this.handleSaveApply(ev); },
+	handleSaveApply: function(ev, mode) {
+		const textarea = document.querySelector('#apcontrolleradditionalscript');
+
+		let value = textarea
+			? ((textarea.value || '').trim().replace(/\r\n/g, '\n') + '\n')
+			: '';
+
+		return fs.write(additionalScriptFile, value)
+			.then(() => {
+				additionalScript = value;
+
+				if (textarea)
+					textarea.value = additionalScript;
+
+				document.body.scrollTop =
+					document.documentElement.scrollTop = 0;
+			})
+			.catch(e => {
+				document.body.scrollTop =
+					document.documentElement.scrollTop = 0;
+
+				ui.addNotification(
+					null,
+					E(
+						'p',
+						(_('Unable to save additional script') + ': %s')
+							.format(e.message)
+					),
+					'error'
+				);
+			})
+			.then(() => this.super('handleSave', [ev]).then(()=>apcCommit('apcontroller')))
+			.then(() => {
+				const container =
+					document.querySelector('.cbi-value[data-name="interval"]');
+
+				if (!container)
+					return;
+
+				const input = container.querySelector('input');
+
+				if (!input)
+					return;
+
+				const interval = input.value;
+
+				return fs.read('/etc/crontabs/root')
+					.then(data => {
+						let crontabsroot = data || '';
+
+						const wanted =
+							`*/${interval} * * * * /usr/bin/apcontroller`;
+
+						const regLine =
+							/^(\*\/\d+ \* \* \* \* \/usr\/bin\/apcontroller)$/m;
+
+						let needUpdate = false;
+
+						if (!regLine.test(crontabsroot)) {
+							if (!crontabsroot.endsWith('\n'))
+								crontabsroot += '\n';
+
+							crontabsroot += wanted + '\n';
+							needUpdate = true;
+						}
+						else if (!crontabsroot.includes(wanted)) {
+							crontabsroot =
+								crontabsroot.replace(regLine, wanted);
+
+							needUpdate = true;
+						}
+
+						if (!needUpdate)
+							return;
+
+						return fs.write(
+							'/etc/crontabs/root',
+							crontabsroot
+						)
+						.then(() => fs.exec('/etc/init.d/cron', ['reload']))
+						.then(() => fs.exec('/usr/bin/apcontroller'));
+					});
+			});
+	},
+
+	render: function(data) {
+		let hosts = data[0] || {};
+
+		let devicestatus = {};
+		let clients = [];
+
+		updateDeviceStatus(data[1]);
+		additionalScript = data[2];
+
+		const devicesmorecolumns = {
+			'status': _('Status'),
+			'lastcontact': _('Last Contact'),
+			'mac': _('MAC Address'),
+			'hostname': _('Hostname'),
+			'model': _('Model'),
+			'software': _('Software'),
+			'uptime': _('Uptime'),
+			'load': _('Load Average'),
+			'cpu': _('CPU (%)'), 'memory_total': _('Pamięć całkowita (B)'), 'memory_used': _('Pamięć użyta (B)'),
+			'clients2g': _('2.4 GHz Clients'),
+			'clients5g': _('5 GHz Clients'),
+			'clients6g': _('6 GHz Clients'),
+			'channels2g': _('2.4 GHz Channel(s)'),
+			'channels5g': _('5 GHz Channel(s)'),
+			'channels6g': _('6 GHz Channel(s)')
+		};
+
+		const clientscolumns = {
+			'ap': _('Connected to'),
+			'ssid': _('Connected to SSID'),
+			'name': _('Name'),
+			'mac': _('MAC Address'),
+			'ipaddr': _('IP Address'),
+			'band': _('Band'),
+			'wifi': _('Std'),
+			'signal': _('Signal'),
+			'connected': _('Connected'),
+			'rx': _('RX'),
+			'tx': _('TX'),
+			'rxrate': _('RX rate'), 'txrate': _('TX rate'), 'noise': _('Noise (dBm)'),
+			'tx_retries': _('TX retries'), 'rx_retries': _('RX retries'), 'tx_packets': _('TX packets'), 'rx_packets': _('RX packets'),
+			'wifi_tx_dropped': _('TX dropped'), 'name_source': _('Źródło nazwy')
+		};
+
+		function ipv4(value) {
+			if (!/^\d+\.\d+\.\d+\.\d+$/.test(value||'')) return null;
+			const a=value.split('.').map(Number); return a.every(n=>n>=0&&n<=255)?a.reduce((n,b)=>n*256+b,0):null;
+		}
+		function inSubnet(ip,cidr) {
+			const parts=String(cidr).split('/'), n=ipv4(ip), base=ipv4(parts[0]), bits=parts[1]==null?32:Number(parts[1]);
+			return n!=null&&base!=null&&Number.isInteger(bits)&&bits>=0&&bits<=32&&Math.floor(n/2**(32-bits))===Math.floor(base/2**(32-bits));
+		}
+		function subnetTag(value) {
+			const ips=String(value||'').match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g)||[], native=L.toArray(uci.get('apcontroller','@global[0]','native_subnet')||['10.48.18.0/24']);
+			const ip=ips.find(ip=>ipv4(ip)!=null&&!native.some(c=>inSubnet(ip,c))); if(!ip)return null;
+			const profile=uci.sections('multivpn','vpn').find(p=>inSubnet(ip,p.remote_subnet));
+			const label=addressSubnet(ip,[])||'adres '+ip+' (maska nieznana)'; let hash=0; for(const c of label)hash=(hash*31+c.charCodeAt(0))>>>0;
+			return {label:label, color:['#3973b9','#9855a6','#ad6500','#147d78','#a34c66'][hash%5]};
+		}
+		function clientSummary(list) {
+			const count={2:0,5:0,6:0}, macs=new Set();list.forEach(c=>{if(count[c.band]!=null)count[c.band]++;if(c.mac)macs.add(c.mac.toUpperCase());});
+			return E('div',{'class':'apc-client-summary'},[['Klienci',list.length],['2,4 GHz',count[2]],['5 GHz',count[5]],['6 GHz',count[6]],['Unikalne MAC',macs.size]].map(([label,n])=>E('div',{},[E('span',{},label),E('strong',{},String(n))])));
+		}
+
+		function updateDeviceStatus(records) {
+			devicestatus = records || {};
+			clients.length = 0;
+
+			if (!devicestatus.hosts)
+				devicestatus.hosts = [];
+
+			devicestatus.hosts.forEach(row => {
+				const ap =
+					uci.get(
+						'apcontroller',
+						row['section'],
+						'name'
+					) || row['section'];
+
+				if (row['mac'])
+					row['mac'] = row['mac'].toUpperCase();
+
+				if (row['channels2g'])
+					row['channels2g'] =
+						row['channels2g'].replaceAll(' ', ', ');
+
+				if (row['channels5g'])
+					row['channels5g'] =
+						row['channels5g'].replaceAll(' ', ', ');
+
+				if (row['channels6g'])
+					row['channels6g'] =
+						row['channels6g'].replaceAll(' ', ', ');
+
+				row['.lastcontact'] = row['.lastcontact'] ?? row['lastcontact'] ?? -1;
+
+				if (row['.lastcontact'] > -1) {
+					const d = new Date(
+						new Date().getTime() -
+						row['.lastcontact'] * 1000
+					);
+
+					row['lastcontact_ts'] =
+						d.getTime() / 1000;
+
+					let t =
+						'' +
+						d.getFullYear() +
+						'-' +
+						lz(d.getMonth() + 1) +
+						'-' +
+						lz(d.getDate()) +
+						' ' +
+						lz(d.getHours()) +
+						':' +
+						lz(d.getMinutes()) +
+						':' +
+						lz(d.getSeconds());
+
+					if (row['.lastcontact'] > 86400)
+						t +=
+							' (' +
+							parseInt(row['.lastcontact'] / 86400) +
+							_('days ago') +
+							')';
+					else if (row['.lastcontact'] > 3600)
+						t +=
+							' (' +
+							parseInt(row['.lastcontact'] / 3600) +
+							_('h ago') +
+							')';
+					else if (row['.lastcontact'] > 60)
+						t +=
+							' (' +
+							parseInt(row['.lastcontact'] / 60) +
+							_('m ago') +
+							')';
+					else
+						t +=
+							' (' +
+							row['.lastcontact'] +
+							_('s ago') +
+							')';
+
+					row['lastcontact'] = t;
+				}
+				else {
+					row['lastcontact'] = '-';
+				}
+
+				if (row['uptime']) {
+					row['.uptime'] = row['uptime'];
+					row['uptime'] =
+						'%t'.format(row['.uptime']);
+				}
+				else {
+					row['uptime'] = '-';
+				}
+
+				if (row.enabled !== false && row.enabled !== 0 && uci.get('apcontroller',row.section,'enabled') !== '0' && row.online === 1 && row['.lastcontact'] <= Number(uci.get('apcontroller','@global[0]','interval')||5)*150 && row['clientslist2g']) {
+					row['clients2g'] =
+						String(row['clientslist2g'].length);
+
+					const t = row['clientslist2g'].map(obj => ({
+						...obj,
+						ap: ap,
+						band: 2
+					}));
+
+					clients = clients.concat(t);
+				}
+
+				if (row.enabled !== false && row.enabled !== 0 && uci.get('apcontroller',row.section,'enabled') !== '0' && row.online === 1 && row['.lastcontact'] <= Number(uci.get('apcontroller','@global[0]','interval')||5)*150 && row['clientslist5g']) {
+					row['clients5g'] =
+						String(row['clientslist5g'].length);
+
+					const t = row['clientslist5g'].map(obj => ({
+						...obj,
+						ap: ap,
+						band: 5
+					}));
+
+					clients = clients.concat(t);
+				}
+
+				if (row.enabled !== false && row.enabled !== 0 && uci.get('apcontroller',row.section,'enabled') !== '0' && row.online === 1 && row['.lastcontact'] <= Number(uci.get('apcontroller','@global[0]','interval')||5)*150 && row['clientslist6g']) {
+					row['clients6g'] =
+						String(row['clientslist6g'].length);
+
+					const t = row['clientslist6g'].map(obj => ({
+						...obj,
+						ap: ap,
+						band: 6
+					}));
+
+					clients = clients.concat(t);
+				}
+			});
+
+			clients.forEach(c => {
+				if (!c.mac)
+					c.mac = '';
+
+				const mac = c.mac.toUpperCase();
+				c.mac = mac;
+
+				if (!c.name || c.name == '*') {
+					if (hosts[mac] && hosts[mac].name)
+						c.name =
+							hosts[mac].name.replace('.lan', '');
+				}
+
+				if (!c.ipaddr || c.ipaddr == '*') {
+					if (hosts[mac] && hosts[mac].ipaddrs)
+						c.ipaddr =
+							hosts[mac].ipaddrs.join('<br>');
+				}
+			});
+
+			const tablediv =
+				document.querySelector('#clients-container');
+
+			if (tablediv) {
+				let table = tablediv.querySelector('table');
+
+				if (table) {
+					let t = L.dom.findClassInstance(table);
+					let sort = null;
+
+					if (typeof t.getActiveSortState === 'function')
+						sort = t.getActiveSortState();
+
+					tablediv.innerHTML = '';
+					tablediv.appendChild(
+						renderClientsTable(clients)
+					);
+
+					if (sort !== null) {
+						table =
+							tablediv.querySelector('table');
+
+						if (table) {
+							t = L.dom.findClassInstance(table);
+
+							if (
+								typeof t.setActiveSortState ===
+								'function'
+							) {
+								t.setActiveSortState(
+									sort[0],
+									sort[1]
+								);
+
+								t.update(
+									t.data,
+									t.placeholder
+								);
+							}
+						}
+					}
+				}
+			}
+		}
+
+		function renderClientsTable(clients) {
+			if (!clients || clients.length === 0) {
+				return E('div',{},[clientSummary([]),E(
+					'table',
+					{
+						'class':
+							'table table-striped cbi-section-table'
+					},
+					[
+						E(
+							'tr',
+							{
+								'class':
+									'tr cbi-section-table-row placeholder'
+							},
+							[
+								E(
+									'td',
+									{ 'class': 'td' },
+									E(
+										'em',
+										_('No wireless clients connected')
+									)
+								)
+							]
+						)
+					]
+				)]);
+			}
+
+			const selectedclientscolumns =
+				uci.get(
+					'apcontroller',
+					'@global[0]',
+					'clientcolumn'
+				) || [];
+
+			const displayColumns =
+				selectedclientscolumns.length > 0
+					? selectedclientscolumns
+					: Object.keys(clientscolumns);
+
+			const headerRow = E(
+				'tr',
+				{ 'class': 'tr table-titles' },
+				displayColumns.map(key =>
+					E(
+						'th',
+						{ 'class': 'th' },
+						[clientscolumns[key]]
+					)
+				)
+			);
+
+			const table = E(
+				'table',
+				{ 'class': 'table table-striped' },
+				[headerRow]
+			);
+
+			function formatCell(key, client) {
+				switch (key) {
+				case 'ipaddr': { const tag=subnetTag(client.ipaddr); return E('span',tag?{'class':'apc-subnet',title:'Podsieć: '+tag.label,style:'border-color:'+tag.color+';color:'+tag.color}:{},String(client.ipaddr||'-').replace(/<br\s*\/?\s*>/gi,', ')); }
+				case 'band':
+					if (client.band == 2)
+						return '2.4 GHz';
+
+					if (client.band == 5)
+						return '5 GHz';
+
+					if (client.band == 6)
+						return '6 GHz';
+
+					return '-';
+
+				case 'wifi':
+					return client.wifi > 0
+						? 'Wi-Fi ' + client.wifi
+						: '-';
+
+				case 'signal':
+					return client.signal != null
+						? client.signal + ' dBm'
+						: '-';
+
+				case 'connected':
+					return [
+						client.connected,
+						'%t'.format(client.connected) || '-'
+					];
+
+				case 'rx':
+					if (client.rx == null) return '-';
+					return [
+						client.rx,
+						'%1024.2mB'.format(client.rx) || '-'
+					];
+
+				case 'tx':
+					if (client.tx == null) return '-';
+					return [
+						client.tx,
+						'%1024.2mB'.format(client.tx) || '-'
+					];
+
+				default:
+					return client[key] == null || client[key] === '' ? '-' : client[key];
+				}
+			}
+
+			const rows = clients.map(client =>
+				displayColumns.map(key =>
+					formatCell(key, client)
+				)
+			);
+
+			cbi_update_table(table, rows);
+
+			return E(
+				'div',
+				[
+					E(
+						'h3',
+						_('Connected Wireless Clients')
+					),
+					clientSummary(clients),
+					E('p',{'class':'apc-subnet-legend'},Array.from(new Map(clients.map(c=>subnetTag(c.ipaddr)).filter(Boolean).map(t=>[t.label,t])).values()).map(t=>E('span',{'class':'apc-subnet',style:'border-color:'+t.color+';color:'+t.color},t.label))),
+					table
+				]
+			);
+		}
+
+		function refreshDeviceGrid() {
+			let devicesall = 0;
+			let devicesonline = 0;
+			let devicesoffline = 0;
+
+			document
+				.querySelectorAll(
+					'#cbi-apcontroller-host tr[data-section-id]'
+				)
+				.forEach(row => {
+					const section_id =
+						row.dataset.sectionId;
+
+					const hostRecord =
+						devicestatus.hosts.find(
+							h => h.section === section_id
+						);
+
+					const offline =
+						!hostRecord ||
+						hostRecord['.lastcontact'] == -1;
+
+					row
+						.querySelectorAll(
+							'li[data-state="disabled"]'
+						)
+						.forEach(e => {
+							if (offline) {
+								e.setAttribute(
+									'aria-disabled',
+									'true'
+								);
+								e.classList.add('disabled');
+								e.style.pointerEvents = 'none';
+								e.style.opacity = '0.5';
+							}
+							else {
+								e.removeAttribute(
+									'aria-disabled'
+								);
+								e.classList.remove('disabled');
+								e.style.pointerEvents = '';
+								e.style.opacity = '';
+							}
+						});
+
+					Object.entries(
+						devicesmorecolumns
+					).forEach(([key]) => {
+						if (
+							selectedcolumns.includes(key) ||
+							key == 'status'
+						) {
+							const cell =
+								row.querySelector(
+									'[data-name="_' +
+									key +
+									'"]'
+								);
+
+							if (!cell)
+								return;
+
+							cell.innerHTML = '';
+
+							if (key == 'status') {
+								const status =
+									hostStatus(
+										hostRecord
+											? [hostRecord]
+											: [],
+										section_id
+									);
+
+								if (
+									status.textContent.includes(
+										_('Online')
+									)
+								)
+									devicesonline++;
+
+								if (
+									status.textContent.includes(
+										_('Offline')
+									)
+								)
+									devicesoffline++;
+
+								cell.appendChild(status);
+							}
+							else {
+								cell.appendChild(
+									hostInfo(
+										key,
+										hostRecord
+											? [hostRecord]
+											: [],
+										section_id
+									)
+								);
+							}
+						}
+					});
+
+					devicesall++;
+				});
+
+			let e =
+				document.querySelector('#devicesall');
+
+			if (e)
+				e.textContent = devicesall;
+
+			e = document.querySelector('#devicesonline');
+
+			if (e)
+				e.textContent = devicesonline;
+
+			e = document.querySelector('#devicesoffline');
+
+			if (e)
+				e.textContent = devicesoffline;
+
+			e = document.querySelector('#devicesunknown');
+
+			if (e)
+				e.textContent =
+					devicesall -
+					devicesonline -
+					devicesoffline;
+		}
+
+		const selectedcolumns =
+			uci.get(
+				'apcontroller',
+				'@global[0]',
+				'column'
+			) || [];
+
+		let m, s, o;
+
+		m = new form.Map(
+			'apcontroller',
+			_('AP Controller'),
+			_('Router and AP Management')
+		);
+
+		m.tabbed = true;
+
+		/*
+		 * DEVICES
+		 */
+		s = m.section(
+			form.GridSection,
+			'host',
+			_('Devices')
+		);
+
+		s.anonymous = true;
+		s.addremove = true;
+		s.nodescriptions = true;
+		s.sortable = false;
+		s.addbtntitle = _('Add new device');
+		s.tab('host', _('Device'));
+
+		s.renderContents = function() {
+			const renderTask =
+				form.GridSection.prototype.renderContents
+					.apply(this, arguments);
+
+			return Promise.resolve(renderTask)
+				.then(nodes => {
+					let devicesall = 0;
+					let devicesonline = 0;
+					let devicesoffline = 0;
+
+					nodes
+						.querySelectorAll(
+							'#cbi-apcontroller-host tr[data-section-id]'
+						)
+						.forEach(row => {
+							const cell =
+								row.querySelector(
+									'td[data-name="_status"]'
+								);
+
+							if (cell) {
+								if (
+									cell.textContent.includes(
+										_('Online')
+									)
+								)
+									devicesonline++;
+
+								if (
+									cell.textContent.includes(
+										_('Offline')
+									)
+								)
+									devicesoffline++;
+							}
+
+							devicesall++;
+						});
+
+					const css =
+						'flex: 1 1 25%;' +
+						'background: var(--border-color-low);' +
+						'border: 1.5px solid var(--border-color-medium);' +
+						'box-sizing: border-box;' +
+						'display: flex;' +
+						'flex-direction: column;' +
+						'justify-content: center;' +
+						'align-items: center;' +
+						'text-align: center;' +
+						'padding: 15px 0;' +
+						'border-radius: 8px;';
+
+					const info = E(
+						'div',
+						{
+							'style':
+								'display:flex;' +
+								'margin-bottom:20px;' +
+								'gap:5px;'
+						},
+						[
+							E(
+								'div',
+								{ 'style': css },
+								[
+									_('All'),
+									E('br'),
+									E('br'),
+									E(
+										'span',
+										{
+											'id':
+												'devicesall',
+											'style':
+												'font-size:1.5em;'
+										},
+										devicesall
+									)
+								]
+							),
+
+							E(
+								'div',
+								{
+									'style':
+										css +
+										'color: green;'
+								},
+								[
+									_('Online'),
+									E('br'),
+									E('br'),
+									E(
+										'span',
+										{
+											'id':
+												'devicesonline',
+											'style':
+												'font-size:1.5em;'
+										},
+										devicesonline
+									)
+								]
+							),
+
+							E(
+								'div',
+								{
+									'style':
+										css +
+										'color: red;'
+								},
+								[
+									_('Offline'),
+									E('br'),
+									E('br'),
+									E(
+										'span',
+										{
+											'id':
+												'devicesoffline',
+											'style':
+												'font-size:1.5em;'
+										},
+										devicesoffline
+									)
+								]
+							),
+
+							E(
+								'div',
+								{
+									'style':
+										css +
+										'color: gray;'
+								},
+								[
+									_('Unknown'),
+									E('br'),
+									E('br'),
+									E(
+										'span',
+										{
+											'id':
+												'devicesunknown',
+											'style':
+												'font-size:1.5em;'
+										},
+										devicesall -
+										devicesonline -
+										devicesoffline
+									)
+								]
+							)
+						]
+					);
+
+					let e =
+						nodes.querySelector(
+							'#cbi-apcontroller-host > h3'
+						);
+
+					if (e)
+						e.parentNode.replaceChild(
+							info,
+							e
+						);
+
+					const clientsContainer = E(
+						'div',
+						{
+							id: 'clients-container',
+							style: 'margin-top:20px;'
+						}
+					);
+
+					clientsContainer.appendChild(
+						renderClientsTable(clients)
+					);
+
+					nodes.appendChild(
+						clientsContainer
+					);
+
+					return nodes;
+				});
+		};
+
+		s.renderRowActions = function(section_id) {
+			const host =
+				devicestatus.hosts.find(
+					item => item.section === section_id
+				);
+
+			let tdEl =
+				this.super(
+					'renderRowActions',
+					[section_id, _('Edit')]
+				);
+
+			const actionBtn =
+				new ui.ComboButton(
+					'more',
+					{
+						'more': [_('More')],
+						'activity': [_('Activity')],
+						'ping': [
+							'%s %s'.format(
+								_('IPv4'),
+								_('Ping')
+							)
+						],
+						'exec': [_('Execute')]
+					},
+					{
+						'classes': {
+							'more':
+								'btn cbi-button cbi-button-normal',
+							'activity':
+								'btn cbi-button cbi-button-normal',
+							'ping':
+								'btn cbi-button cbi-button-normal',
+							'exec':
+								'btn cbi-button cbi-button-normal'
+						},
+						'click': null,
+						'sort': false
+					}
+				).render();
+
+			/*
+			 * Actions requiring a live AP are disabled
+			 * until status is available.
+			 */
+			const actionItems = [
+				'more',
+				'activity',
+				'exec'
+			];
+
+			actionItems.forEach(value => {
+				const li =
+					actionBtn.querySelector(
+						'li[data-value="' +
+						value +
+						'"]'
+					);
+
+				if (!li)
+					return;
+
+				li.setAttribute(
+					'data-state',
+					'disabled'
+				);
+			});
+
+			const offline =
+				!host ||
+				host['.lastcontact'] == -1;
+
+			if (offline) {
+				actionItems.forEach(value => {
+					const li =
+						actionBtn.querySelector(
+							'li[data-value="' +
+							value +
+							'"]'
+						);
+
+					if (!li)
+						return;
+
+					li.setAttribute(
+						'aria-disabled',
+						'true'
+					);
+
+					li.classList.add('disabled');
+					li.style.pointerEvents = 'none';
+					li.style.opacity = '0.5';
+				});
+			}
+			else {
+				actionItems.forEach(value => {
+					const li =
+						actionBtn.querySelector(
+							'li[data-value="' +
+							value +
+							'"]'
+						);
+
+					if (!li)
+						return;
+
+					li.removeAttribute(
+						'aria-disabled'
+					);
+
+					li.classList.remove(
+						'disabled'
+					);
+
+					li.style.pointerEvents = '';
+					li.style.opacity = '';
+				});
+			}
+
+			actionBtn
+				.querySelectorAll(
+					'li[data-value]'
+				)
+				.forEach(li => {
+					li.addEventListener(
+						'click',
+						ev => {
+							if (
+								li.getAttribute(
+									'aria-disabled'
+								) === 'true'
+							)
+								return;
+
+							switch (
+								li.dataset.value
+							) {
+							case 'more':
+								this.actionMoreInformation(
+									section_id,
+									ev
+								);
+								break;
+
+							case 'activity':
+								this.actionActivity(
+									section_id,
+									ev
+								);
+								break;
+
+							case 'ping':
+								this.actionPing(
+									section_id,
+									ev
+								);
+								break;
+
+							case 'exec':
+								this.actionExec(
+									section_id,
+									ev
+								);
+								break;
+							}
+
+							setTimeout(() => {
+								const defaultLi =
+									actionBtn.querySelector(
+										'li[data-value="more"]'
+									);
+
+								if (
+									defaultLi
+								) {
+									actionBtn
+										.querySelectorAll(
+											'li[data-value]'
+										)
+										.forEach(e => {
+											e.removeAttribute(
+												'selected'
+											);
+											e.removeAttribute(
+												'display'
+											);
+										});
+
+									defaultLi.setAttribute(
+										'selected',
+										''
+									);
+
+									defaultLi.setAttribute(
+										'display',
+										0
+									);
+								}
+							}, 50);
+						}
+					);
+				});
+
+			dom.content(
+				tdEl.lastChild,
+				[
+					actionBtn,
+					tdEl.lastChild.childNodes[0],
+					tdEl.lastChild.childNodes[1]
+				]
+			);
+
+			return tdEl;
+		};
+
+		s.handleAdd = function(ev) {
+			ev?.preventDefault();
+
+			const newSid =
+				nextFreeSid(
+					'host',
+					uci.sections(
+						'apcontroller',
+						'host'
+					).length
+				);
+
+			this.map.data.add(
+				'apcontroller',
+				'host',
+				newSid
+			);
+
+			return this.map.reset()
+				.then(() => {
+					const row =
+						document.querySelector(
+							'[data-section-id="' +
+							newSid +
+							'"]'
+						);
+
+					if (!row)
+						return;
+
+					const editBtn =
+						row.querySelector(
+							'button[title="Edit"], .cbi-button.cbi-button-edit'
+						);
+
+					if (editBtn)
+						editBtn.click();
+
+					setTimeout(() => {
+						const modal =
+							document.querySelector(
+								'.modal'
+							);
+
+						if (!modal)
+							return;
+
+						const dismissBtn =
+							modal.querySelector(
+								'.btn, .cbi-button.cbi-button-reset'
+							);
+
+						if (!dismissBtn)
+							return;
+
+						dismissBtn.addEventListener(
+							'click',
+							() => {
+								this.map.data.remove(
+									'apcontroller',
+									newSid
+								);
+
+								callAPController()
+									.then(livestatus => {
+										updateDeviceStatus(
+											livestatus
+										);
+
+										return this.map.render();
+									})
+									.then(() => {
+										refreshDeviceGrid();
+									});
+							},
+							{ once: true }
+						);
+					}, 50);
+				});
+		};
+
+		s.actionMoreInformation = function(section_id) {
+			const host =
+				devicestatus.hosts.find(
+					item => item.section === section_id
+				);
+
+			const row =
+				this.cfgvalue(section_id);
+
+			const table =
+				E(
+					'table',
+					{ 'class': 'table' }
+				);
+
+			table.append(
+				E(
+					'tr',
+					{ 'class': 'tr' },
+					[
+						E(
+							'td',
+							{ 'class': 'td' },
+							_('Enabled')
+						),
+						E(
+							'td',
+							{ 'class': 'td' },
+							row['enabled'] == 1
+								? _('Yes')
+								: _('No')
+						)
+					]
+				)
+			);
+
+			table.append(
+				E(
+					'tr',
+					{ 'class': 'tr' },
+					[
+						E(
+							'td',
+							{ 'class': 'td' },
+							_('Name')
+						),
+						E(
+							'td',
+							{ 'class': 'td' },
+							row['name']
+						)
+					]
+				)
+			);
+
+			table.append(
+				E(
+					'tr',
+					{ 'class': 'tr' },
+					[
+						E(
+							'td',
+							{ 'class': 'td' },
+							_('Host Address')
+						),
+						E(
+							'td',
+							{ 'class': 'td' },
+							row['ipaddr']
+						)
+					]
+				)
+			);
+
+			if (host) {
+				Object.entries(
+					devicesmorecolumns
+				).forEach(([key, value]) => {
+					let val =
+						host[key]
+							? host[key]
+							: host[key] === 0 ? 0 : '-';
+
+					if (key == 'status')
+						val =
+							hostStatus(
+								[host],
+								section_id
+							);
+
+					if (
+						typeof host[key] !==
+							'undefined' ||
+						key == 'status'
+					) {
+						table.append(
+							E(
+								'tr',
+								{ 'class': 'tr' },
+								[
+									E(
+										'td',
+										{ 'class': 'td' },
+										value
+									),
+									E(
+										'td',
+										{ 'class': 'td' },
+										val
+									)
+								]
+							)
+						);
+					}
+				});
+			}
+
+			ui.showModal(
+				_('More Information'),
+				[
+					table,
+					E('details', {}, [E('summary', {}, _('Dane diagnostyczne AP, radia i klientów')), E('p', {}, _('Liczniki retries są kumulacyjne; nie stanowią procentu strat. Brak pola oznacza brak danych ze sprzętu.')), E('pre', {style:'max-height:420px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere'}, JSON.stringify(host || {}, null, 2))]),
+					E(
+						'div',
+						{ 'class': 'right' },
+						[
+							E(
+								'button',
+								{
+									'class':
+										'cbi-button cbi-button-neutral',
+									'click':
+										ui.hideModal
+								},
+								_('Dismiss')
+							)
+						]
+					)
+				]
+			);
+		};
+
+		s.actionActivity = function(section_id) {
+			return L.resolveDefault(
+				callAPControllerActivity(section_id),
+				{}
+			)
+			.then(res => {
+				function formatDate(date) {
+					return (
+						date.getFullYear() +
+						'-' +
+						lz(date.getMonth() + 1) +
+						'-' +
+						lz(date.getDate())
+					);
+				}
+
+				const now = new Date();
+				const days = [];
+
+				for (let i = 0; i < 14; i++) {
+					const d = new Date(now);
+
+					d.setDate(
+						now.getDate() - i
+					);
+
+					days.push(
+						formatDate(d)
+					);
+				}
+
+				const heatmap = {};
+
+				days.forEach(day => {
+					heatmap[day] = {};
+
+					for (let h = 0; h < 24; h++)
+						heatmap[day][h] = -1;
+				});
+
+				(res.activity || []).forEach(entry => {
+					const dt =
+						new Date(
+							entry.timestamp * 1000
+						);
+
+					const day =
+						formatDate(dt);
+
+					const hour =
+						dt.getHours();
+
+					if (
+						heatmap[day] !==
+						undefined
+					) {
+						if (entry.value === 0) {
+							heatmap[day][hour] = 0;
+						}
+						else if (
+							entry.value === 1
+						) {
+							if (
+								heatmap[day][hour] !==
+								0
+							)
+								heatmap[day][hour] = 1;
+						}
+					}
+				});
+
+				const table = [];
+
+				table.push(
+					E(
+						'div',
+						{
+							'style':
+								'display:flex;' +
+								'align-items:center;' +
+								'justify-content:center;' +
+								'user-select:none;'
+						},
+						['']
+					)
+				);
+
+				for (let h = 0; h < 24; h++) {
+					table.push(
+						E(
+							'div',
+							{
+								'style':
+									'display:flex;' +
+									'align-items:center;' +
+									'justify-content:center;' +
+									'user-select:none;'
+							},
+							[h]
+						)
+					);
+				}
+
+				days.forEach(day => {
+					table.push(
+						E(
+							'div',
+							{
+								'style':
+									'display:flex;' +
+									'align-items:center;' +
+									'justify-content:center;' +
+									'user-select:none;'
+							},
+							[day]
+						)
+					);
+
+					for (let h = 0; h < 24; h++) {
+						let css =
+							'position:absolute;' +
+							'top:0;left:0;right:0;bottom:0;' +
+							'display:flex;' +
+							'align-items:center;' +
+							'justify-content:center;' +
+							'color:var(--border-color-low);';
+
+						const val =
+							heatmap[day][h];
+
+						if (val === 1)
+							css +=
+								'background-color:#4caf50;color:white;';
+
+						else if (val === 0)
+							css +=
+								'background-color:#e53935;color:white;';
+
+						table.push(
+							E(
+								'div',
+								{
+									'style':
+										'position:relative;' +
+										'width:14px;' +
+										'background:var(--border-color-low);' +
+										'border-radius:2px;' +
+										'box-shadow:0 1px 2px #0001;' +
+										'box-sizing:border-box;'
+								},
+								[
+									E(
+										'div',
+										{
+											'style': css,
+											'title':
+												day +
+												': ' +
+												h
+										},
+										[' ']
+									)
+								]
+							)
+						);
+					}
+				});
+
+				ui.showModal(
+					_('Activity'),
+					[
+						E(
+							'div',
+							{
+								'style':
+									'display:grid;' +
+									'grid-template-columns:100px repeat(24,14px);' +
+									'grid-gap:4px;' +
+									'margin:10px;'
+							},
+							table
+						),
+
+						E(
+							'div',
+							{ 'class': 'right' },
+							[
+								E(
+									'button',
+									{
+										'class':
+											'cbi-button cbi-button-neutral',
+										'click':
+											ui.hideModal
+									},
+									_('Dismiss')
+								)
+							]
+						)
+					]
+				);
+			});
+		};
+
+		s.actionPing = function(section_id) {
+			const row =
+				this.cfgvalue(section_id);
+
+			ui.showModal(
+				_('Ping'),
+				[
+					E(
+						'p',
+						{ 'class': 'spinning' },
+						_('Pinging device...')
+					)
+				]
+			);
+
+			return fs.exec(
+				'ping',
+				[
+					'-4',
+					'-c',
+					'5',
+					'-W',
+					'1',
+					row['ipaddr']
+				]
+			)
+			.then(res => {
+				ui.showModal(
+					_('Ping'),
+					[
+						res.stdout
+							? E(
+								'textarea',
+								{
+									'spellcheck': 'false',
+									'wrap': 'off',
+									'rows': 25
+								},
+								[res.stdout]
+							)
+							: '',
+
+						res.stderr
+							? E(
+								'textarea',
+								{
+									'spellcheck': 'false',
+									'wrap': 'off',
+									'rows': 25
+								},
+								[res.stderr]
+							)
+							: '',
+
+						E(
+							'div',
+							{ 'class': 'right' },
+							[
+								E(
+									'button',
+									{
+										'class':
+											'cbi-button cbi-button-primary',
+										'click':
+											ui.hideModal
+									},
+									_('Dismiss')
+								)
+							]
+						)
+					]
+				);
+			})
+			.catch(err => {
+				ui.hideModal();
+
+				ui.addNotification(
+					null,
+					[
+						E(
+							'p',
+							[
+								_('Error') +
+								': ',
+								err
+							]
+						)
+					]
+				);
+			});
+		};
+
+		/*
+		 * EXECUTE SCRIPT
+		 *
+		 * IMPORTANT:
+		 * OpenSSH scp >= 9 defaults to SFTP.
+		 * OpenWrt Dropbear targets often do not have
+		 * /usr/libexec/sftp-server.
+		 *
+		 * Therefore -O is deliberately used below.
+		 */
+		s.actionExec=function(section_id){
+	const row=this.cfgvalue(section_id);
+	if(row.platform==='omada'){ui.addNotification(null,E('p','Omada udostępnia CLI, nie powłokę do skryptów OpenWrt. Użyj kontrolera Omada do konfiguracji.'));return Promise.resolve();}
+
+	return callAPControllerScripts().then(function(res){
+		res.scripts.sort((a,b)=>a.file.localeCompare(b.file));
+
+		let options=[];
+		res.scripts.forEach(s=>{
+			options.push(E('option',{
+				'data-warn':s.warn,
+				'value':s.file
+			},[s.description]));
+		});
+
+		ui.showModal(_('Execute script'),[
+			E('div',{
+				'style':'display:flex;gap:8px;align-items:center;'
+			},[
+				E('select',{
+					'id':'actionexecscript',
+					'style':'width:100%'
+				},options),
+
+				E('div',{'class':'right'},[
+					E('button',{
+						'class':'cbi-button cbi-button-primary',
+						'click':ui.createHandlerFn(this,async function(){
+
+							const stdout=document.querySelector('#actionexecstdout');
+							const stderr=document.querySelector('#actionexecstderr');
+
+							if(stdout) stdout.value='';
+							if(stderr) stderr.value='';
+
+							const select=document.querySelector('#actionexecscript');
+							if(!select || !select.options.length)
+								return;
+
+							const selectedOption=select.options[select.selectedIndex];
+							const script=selectedOption.value;
+							const description=selectedOption.text;
+							const warn=selectedOption.getAttribute('data-warn');
+
+							if(warn=='1'){
+								if(!confirm(
+									_('Are you sure you want to execute the "%s" script?')
+									.format(description)
+								))
+									return;
+							}
+
+							const sshCommon=[
+								'-o','StrictHostKeyChecking=accept-new',
+								'-o','HostKeyAlgorithms=+ssh-rsa',
+								'-o','PubkeyAcceptedAlgorithms=+ssh-rsa'
+							];
+
+							let cmd;
+							let args;
+
+							/*
+							 * Ubiquiti / old OpenSSH:
+							 *
+							 * - only ssh-rsa/ssh-dss host keys
+							 * - no SFTP subsystem
+							 *
+							 * Therefore use legacy scp mode (-O).
+							 */
+
+							if(row['usekeyfile'] && row['keyfile']){
+
+								cmd='scp';
+
+								args=[
+									'-O',
+									'-i',row['keyfile'],
+									...sshCommon,
+									'-P',row['port'],
+									'/usr/share/apcontroller/scripts/'+script,
+									row['username']+'@'+row['ipaddr']+':/tmp/'
+								];
+
+							}else{
+
+								cmd='sshpass';
+
+								args=[
+									'-p',
+									typeof row['password']!=='undefined'
+										? row['password']
+										: '""',
+									'scp',
+									'-O',
+									...sshCommon,
+									'-P',row['port'],
+									'/usr/share/apcontroller/scripts/'+script,
+									row['username']+'@'+row['ipaddr']+':/tmp/'
+								];
+							}
+
+							/*
+							 * First copy the script.
+							 */
+							return fs.exec(cmd,args).then(function(copyres){
+
+								if(copyres.stdout && stdout)
+									stdout.value=copyres.stdout;
+
+								if(copyres.stderr && stderr)
+									stderr.value=copyres.stderr;
+
+								/*
+								 * Do not execute the remote script if SCP failed.
+								 */
+								if(copyres.code!==0)
+									throw new Error(
+										copyres.stderr ||
+										_('Unable to copy script to device')
+									);
+
+								/*
+								 * Now execute it over SSH.
+								 */
+								if(row['usekeyfile'] && row['keyfile']){
+
+									cmd='ssh';
+
+									args=[
+										'-q',
+										'-i',row['keyfile'],
+										...sshCommon,
+										'-p',row['port'],
+										row['username']+'@'+row['ipaddr'],
+										'sh',
+										'/tmp/'+script
+									];
+
+								}else{
+
+									cmd='sshpass';
+
+									args=[
+										'-p',
+										typeof row['password']!=='undefined'
+											? row['password']
+											: '""',
+										'ssh',
+										'-q',
+										...sshCommon,
+										'-p',row['port'],
+										row['username']+'@'+row['ipaddr'],
+										'sh',
+										'/tmp/'+script
+									];
+								}
+
+								return fs.exec(cmd,args).then(function(execres){
+
+									if(execres.stdout && stdout)
+										stdout.value=execres.stdout;
+
+									if(execres.stderr && stderr){
+										let err=execres.stderr;
+
+										err=err.replace(
+											/^.*Caution, skipping hostkey check for [\d.]+\n\n/,
+											''
+										);
+
+										stderr.value=err;
+									}
+
+									if(execres.code!==0 && stderr && !stderr.value)
+										stderr.value=_('Remote script exited with code %s')
+											.format(execres.code);
+
+								}).catch(function(err){
+
+									if(stderr)
+										stderr.value=err.message || err;
+
+								});
+
+							}).catch(function(err){
+
+								if(stderr)
+									stderr.value=err.message || err;
+
+							});
+
+						})
+					},[_('Execute')])
+				])
+			]),
+
+			E('span',_('Result')),
+
+			E('textarea',{
+				'id':'actionexecstdout',
+				'spellcheck':'false',
+				'wrap':'off',
+				'rows':25,
+				'style':'width:100%;white-space:nowrap'
+			},[]),
+
+			E('span',_('Errors')),
+
+			E('textarea',{
+				'id':'actionexecstderr',
+				'spellcheck':'false',
+				'wrap':'off',
+				'rows':10,
+				'style':'width:100%;white-space:nowrap'
+			},[]),
+
+			E('div',{'class':'right'},[
+				E('button',{
+					'class':'cbi-button cbi-button-primary',
+					'click':ui.hideModal
+				},[_('Dismiss')])
+			])
+		]);
+	});
+};
+
+		/*
+		 * HOST OPTIONS
+		 */
+
+		o = s.taboption(
+			'host',
+			form.Flag,
+			'enabled',
+			_('Enabled'),
+			_('When enabled, the device will be polled periodically')
+		);
+
+		o.rmempty = false;
+		o.editable = true;
+		o.default = '1';
+
+		if (!selectedcolumns.includes('enabled'))
+			o.modalonly = true;
+
+		o = s.taboption(
+			'host',
+			form.Value,
+			'name',
+			_('Name'),
+			_('User-readable description')
+		);
+
+		o.rmempty = false;
+
+		if (!selectedcolumns.includes('name'))
+			o.modalonly = true;
+
+		o.textvalue = function(section_id) {
+			const name =
+				this.map.data.get(
+					'apcontroller',
+					section_id,
+					'name'
+				);
+
+			const url =
+				this.map.data.get(
+					'apcontroller',
+					section_id,
+					'url'
+				);
+
+			if (
+				url &&
+				url.trim() !== ''
+			) {
+				return E(
+					'a',
+					{
+						'href': url,
+						'target': '_blank',
+						'rel':
+							'noopener noreferrer'
+					},
+					name
+				);
+			}
+
+			return name;
+		};
+
+		o = s.taboption(
+			'host',
+			form.Value,
+			'ipaddr',
+			_('Host Address'),
+			_('Hostname or IP Address')
+		);
+
+		o.rmempty = false;
+		o.datatype =
+			'or(hostname,ip4addr("nomask"))';
+
+		if (!selectedcolumns.includes('ipaddr'))
+			o.modalonly = true;
+
+		o.textvalue = function(section_id) { const value=uci.get('apcontroller',section_id,'ipaddr')||'-', tag=subnetTag(value); return E('span',tag?{'class':'apc-subnet',title:'Podsieć: '+tag.label,style:'border-color:'+tag.color+';color:'+tag.color}:{},value); };
+		let ipaddrs = {};
+
+		Object.keys(hosts).forEach(mac => {
+			const addrs =
+				L.toArray(
+					hosts[mac].ipaddrs ||
+					hosts[mac].ipv4
+				);
+
+			for (let i = 0; i < addrs.length; i++)
+				ipaddrs[addrs[i]] =
+					hosts[mac].name ||
+					mac;
+		});
+
+		L.sortedKeys(
+			ipaddrs,
+			null,
+			'addr'
+		).forEach(ipv4 => {
+			o.value(
+				ipv4,
+				ipaddrs[ipv4]
+					? '%s (%s)'.format(
+						ipv4,
+						ipaddrs[ipv4]
+					)
+					: ipv4
+			);
+		});
+
+		o = s.taboption(
+			'host',
+			form.Value,
+			'port',
+			_('Port'),
+			_('SSH Port'),
+			_('Default: 22')
+		);
+
+		o.modalonly = true;
+		o.default = 22;
+		o.datatype = 'port';
+
+		o = s.taboption(
+			'host',
+			form.Value,
+			'username',
+			_('Username'),
+			_('Device Login')
+		);
+
+		o.modalonly = true;
+		o.rmempty = false;
+		o.default = 'root';
+
+		o = s.taboption(
+			'host',
+			form.Flag,
+			'usekeyfile',
+			_('Use SSH key'),
+			_('Use SSH key instead of password')
+		);
+
+		o.modalonly = true;
+		o.rmempty = false;
+		o.default = 0;
+
+		o = s.taboption(
+			'host',
+			form.Value,
+			'keyfile',
+			_('SSH Key file'),
+			_('SSH Key file')
+		);
+
+		o.modalonly = true;
+		o.rmempty = false;
+		o.default =
+			'/root/.ssh/id_dropbear';
+
+		o.depends(
+			'usekeyfile',
+			'1'
+		);
+
+		o = s.taboption(
+			'host',
+			form.Value,
+			'password',
+			_('Password'),
+			_('Device Password')
+		);
+
+		o.modalonly = true;
+		o.password = true;
+
+		o.depends(
+			'usekeyfile',
+			'0'
+		);
+
+		o=s.taboption('host',form.Value,'authorizedkey','Klucz publiczny do dopisania na AP','Pojedynczy publiczny klucz SSH. Dopisywanie obsługiwane dla root na OpenWrt; nie wklejaj klucza prywatnego.');o.modalonly=true;o.rmempty=true;
+		o=s.taboption('host',form.DummyValue,'_authorizekey','Instalacja klucza');o.modalonly=true;o.renderWidget=function(id){return E('button',{type:'button','class':'cbi-button',click:ui.createHandlerFn(this,async()=>{try{await m.save();await uci.save();await apcCommit('apcontroller');const r=await fs.exec('/usr/bin/apcontroller-authorize-key',[id]);if(r.code)throw new Error(r.stderr||r.stdout);ui.addNotification(null,E('p',r.stdout));}catch(e){ui.addNotification(null,E('p',e.message),'error');}})},'Dopisz klucz publiczny na AP');};
+
+		o=s.taboption('host',form.DummyValue,'_management','Obsługa urządzenia');o.cfgvalue=function(id){const p=uci.get('apcontroller',id,'platform')||(devicestatus.hosts||[]).find(h=>h.section===id)?.platform||'nieznana';return p==='openwrt'?'Odczyt, konfiguracja Wi-Fi i skrypty przez SSH':'Odczyt '+p+'; konfigurację Wi-Fi prowadź w kontrolerze producenta';};
+		o=s.taboption('host',form.DummyValue,'_sshhelp','Dostęp SSH');o.modalonly=true;o.cfgvalue=()=> 'Login i hasło powyżej służą do dostępu do AP. Tryb klucza wymaga istniejącego prywatnego pliku na routerze i dopisanego klucza publicznego na AP. Skrypty: menu urządzenia → Execute; pliki na routerze /usr/share/apcontroller/scripts/. Omada CLI nie wykonuje skryptów powłoki.';
+
+		Object.entries(
+			devicesmorecolumns
+		).forEach(([key, value]) => {
+			if (
+				selectedcolumns.includes(key) ||
+				key == 'status'
+			) {
+				o = s.taboption(
+					'host',
+					form.DummyValue,
+					'_' + key,
+					value
+				);
+
+				o.rawhtml = true;
+				o.write = function() {};
+				o.remove = function() {};
+				o.modalonly = false;
+
+				if (key == 'status')
+					o.textvalue =
+						hostStatus.bind(
+							o,
+							devicestatus.hosts
+						);
+				else
+					o.textvalue =
+						hostInfo.bind(
+							o,
+							key,
+							devicestatus.hosts
+						);
+			}
+		});
+
+		o = s.taboption(
+			'host',
+			form.Value,
+			'url',
+			_('GUI URL'),
+			_('Link to device GUI address')
+		);
+
+		o.modalonly = true;
+		o.datatype = 'string';
+
+		o.validate = function(
+			section_id,
+			value
+		) {
+			if (value == '')
+				return true;
+
+			if (
+				!value.match(
+					/^(http|https):\/\//
+				)
+			)
+				return _(
+					'URL format error, format: http:// or https://'
+				);
+
+			return true;
+		};
+
+		/*
+		 * WIFI
+		 */
+
+		s = m.section(
+			form.GridSection,
+			'wifi',
+			_('Wi-Fi')
+		);
+
+		s.addremove = true;
+		s.anonymous = true;
+		s.addbtntitle = _('Add new Wi-Fi');
+		s.nodescriptions = true;
+		s.tab('wifi', _('Wi-Fi'));
+
+		s.renderContents = function() {
+			const renderTask =
+				form.GridSection.prototype.renderContents
+					.apply(this, arguments);
+
+			return Promise.resolve(renderTask)
+				.then(nodes => {
+					const e =
+						nodes.querySelector(
+							'#cbi-apcontroller-wifi > h3'
+						);
+
+					if (e)
+						e.remove();
+
+					return nodes;
+				});
+		};
+
+		s.handleAdd = function(ev) {
+			ev?.preventDefault();
+
+			const newSid =
+				nextFreeSid(
+					'wifi',
+					uci.sections(
+						'apcontroller',
+						'wifi'
+					).length
+				);
+
+			this.map.data.add(
+				'apcontroller',
+				'wifi',
+				newSid
+			);
+
+			return this.map.reset()
+				.then(() => {
+					const row =
+						document.querySelector(
+							'[data-section-id="' +
+							newSid +
+							'"]'
+						);
+
+					if (!row)
+						return;
+
+					const editBtn =
+						row.querySelector(
+							'button[title="Edit"], .cbi-button.cbi-button-edit'
+						);
+
+					if (editBtn)
+						editBtn.click();
+
+					setTimeout(() => {
+						const modal =
+							document.querySelector(
+								'.modal'
+							);
+
+						if (!modal)
+							return;
+
+						const dismissBtn =
+							modal.querySelector(
+								'.btn, .cbi-button.cbi-button-reset'
+							);
+
+						if (!dismissBtn)
+							return;
+
+						dismissBtn.addEventListener(
+							'click',
+							() => {
+								this.map.data.remove(
+									'apcontroller',
+									newSid
+								);
+
+								this.map.reset();
+							},
+							{ once: true }
+						);
+					}, 50);
+				});
+		};
+
+		o = s.taboption(
+			'wifi',
+			form.Value,
+			'name',
+			_('Name'),
+			_('User-readable description')
+		);
+
+		o.rmempty = false;
+
+		o = s.taboption(
+			'wifi',
+			form.Flag,
+			'enabled',
+			_('Enabled'),
+			_('Default Wi-Fi state')
+		);
+
+		o.rmempty = false;
+		o.default = '1';
+
+		o = s.taboption(
+			'wifi',
+			form.MultiValue,
+			'band',
+			_('Wi-Fi Band')
+		);
+
+		o.rmempty = false;
+		o.value('2g', '2.4 GHz');
+		o.value('5g', '5 GHz');
+		o.value('6g', '6 GHz');
+		o.default = ['2g', '5g'];
+
+		o.textvalue = function(section_id) {
+			const cfgvalues =
+				L.toArray(this.map.data.get(
+					'apcontroller',
+					section_id,
+					'band'
+				));
+
+			let names = [];
+
+			cfgvalues.forEach(band => {
+				switch (band) {
+				case '2g':
+					names.push('2.4 GHz');
+					break;
+
+				case '5g':
+					names.push('5 GHz');
+					break;
+
+				case '6g':
+					names.push('6 GHz');
+					break;
+				}
+			});
+
+			if (names.length == 0)
+				names = cfgvalues;
+
+			return names.join(', ');
+		};
+
+		o = s.taboption(
+			'wifi',
+			form.Value,
+			'ssid',
+			_('SSID'),
+			_('The name that the APs are to advertise')
+		);
+
+		o.rmempty = false;
+
+		o = s.taboption(
+			'wifi',
+			form.ListValue,
+			'encryption',
+			_('Encryption')
+		);
+
+		o.modalonly = true;
+
+		o.value('sae', _('WPA3 Pers. (SAE)'));
+		o.value(
+			'sae-mixed',
+			_('WPA2/WPA3 Pers. (CCMP)')
+		);
+		o.value(
+			'psk2',
+			_('WPA2 Pers.')
+		);
+		o.value(
+			'psk2+ccmp',
+			_('WPA2 Pers. (CCMP)')
+		);
+		o.value(
+			'psk2+tkip',
+			_('WPA2 Pers. (TKIP)')
+		);
+		o.value(
+			'psk',
+			_('WPA Pers.')
+		);
+		o.value(
+			'psk+ccmp',
+			_('WPA Pers. (CCMP)')
+		);
+		o.value(
+			'psk+tkip',
+			_('WPA Pers. (TKIP)')
+		);
+		o.value(
+			'psk-mixed+ccmp',
+			_('WPA/WPA2 Pers. (CCMP)')
+		);
+		o.value(
+			'psk-mixed+tkip',
+			_('WPA/WPA2 Pers. (TKIP)')
+		);
+		o.value(
+			'owe',
+			_('WPA3 OWE (CCMP)')
+		);
+		o.value(
+			'none',
+			_('none')
+		);
+
+		o.default = 'psk2';
+
+		o = s.taboption(
+			'wifi',
+			form.Value,
+			'key',
+			_('Password')
+		);
+
+		o.modalonly = true;
+		o.rmempty = false;
+
+		o.depends({
+			encryption: 'sae',
+			'!contains': true
+		});
+
+		o.depends({
+			encryption: 'psk',
+			'!contains': true
+		});
+
+		o.datatype = 'wpakey';
+		o.password = true;
+
+		o = s.taboption(
+			'wifi',
+			form.Flag,
+			'hidden',
+			_('Hide SSID'),
+			_('Do not show network name')
+		);
+
+		o.modalonly = true;
+		o.rmempty = false;
+		o.default = '0';
+
+		o = s.taboption(
+			'wifi',
+			form.Flag,
+			'isolate',
+			_('Isolate Clients'),
+			_('Prevents client-to-client communication')
+		);
+
+		o.modalonly = true;
+		o.rmempty = false;
+		o.default = '0';
+
+		o = s.taboption(
+			'wifi',
+			form.Value,
+			'network',
+			_('Network'),
+			_('The name of the network to which the Wi-Fi will belong')
+		);
+
+		o.modalonly = true;
+		o.rmempty = false;
+		o.datatype = 'uciname';
+
+		o.validate = function(
+			section_id,
+			value
+		) {
+			if (value.length > 15)
+				return _(
+					'The interface name is too long'
+				);
+
+			return true;
+		};
+
+		o.default = 'lan';
+		const networkChoices=new Map();uci.sections('network','interface').filter(n=>n['.name']!=='loopback').forEach(n=>networkChoices.set(n['.name'],n['.name']+' — router ('+(n.proto||'?')+')'));
+		uci.sections('apcontroller','wifi').forEach(w=>{if(w.network&&!networkChoices.has(w.network))networkChoices.set(w.network,w.network+' — szablon Wi-Fi');});
+		(devicestatus.hosts||[]).filter(h=>h.platform==='openwrt'||h.type==='openwrt').forEach(h=>String(h.network_names||'').split(/\s+/).filter(Boolean).forEach(n=>{if(!networkChoices.has(n))networkChoices.set(n,n+' — AP '+(h.name||h.ipaddr));}));
+		for(const [name,label] of networkChoices)o.value(name,label);
+		o.description='Wybierz istniejącą sieć lub wpisz nową nazwę. To interfejs na docelowym AP, nie SSID. Nowa sieć wymaga VLAN-u albo przygotowania na AP. Zapis publikuje stan dla przypisanych OpenWrt, jeśli włączono automatyczną publikację. Zapisz i wyślij dodatkowo wywołuje pobranie od razu.';
+		o=s.taboption('wifi',form.Flag,'vlan_auto','VLAN z wybranego interfejsu routera');o.default='1';o.modalonly=true;o.rmempty=false;o.description='Odczytuje tagowanie istniejącego interfejsu. Na AP używa zgodnej sieci; przy innym VLAN-ie przerywa wysyłanie.';
+		o=s.taboption('wifi',form.Value,'vlan_id','VLAN na AP (opcjonalnie)','Przy wysyłaniu przygotuj interfejs bez adresu i tagowanie jak istniejący VLAN gościnny. Obsługiwany wykryty układ switch_guest/dev_guest na OpenWrt; inne układy wymagają dodatkowego skryptu. Nie zmienia VLAN-ów na głównym routerze.');o.datatype='range(1,4094)';o.modalonly=true;o.rmempty=true;o.depends('vlan_auto','0');
+		const vlanChoices=new Set();for(const type of ['device','switch_vlan','bridge-vlan'])uci.sections('network',type).forEach(n=>{const v=n.vid||(type!=='device'?n.vlan:null);if(Number(v)>=2&&Number(v)<=4094)vlanChoices.add(String(v));});uci.sections('apcontroller','wifi').forEach(w=>{if(w.vlan_id)vlanChoices.add(String(w.vlan_id));});(devicestatus.hosts||[]).forEach(h=>String(h.vlan_ids||'').split(/\s+/).filter(v=>Number(v)>=2&&Number(v)<=4094).forEach(v=>vlanChoices.add(v)));for(const vid of [...vlanChoices].sort((a,b)=>Number(a)-Number(b)))o.value(vid,'VLAN '+vid);o.description='Wybierz znany VLAN lub wpisz nowy (2–4094). Zapisz i wyślij utworzy sieć/VLAN tylko na zgodnych OpenWrt w rozpoznanym układzie portów; uplink i główny router muszą przenosić ten VLAN. Puste pole używa istniejącej sieci AP.';
+
+		o = s.taboption(
+			'wifi',
+			form.ListValue,
+			'macfilter',
+			_('MAC Address Filter')
+		);
+
+		o.modalonly = true;
+		o.rmempty = false;
+		o.default = 'disable';
+
+		o.value(
+			'disable',
+			_('Disabled')
+		);
+
+		o.value(
+			'allow',
+			_('Allow listed only')
+		);
+
+		o.value(
+			'deny',
+			_('Allow all except listed')
+		);
+
+		o = s.taboption(
+			'wifi',
+			form.DynamicList,
+			'maclist',
+			_('MAC Address List')
+		);
+
+		o.modalonly = true;
+		o.rmempty = true;
+		o.datatype = 'macaddr';
+
+		o.depends(
+			'macfilter',
+			'allow'
+		);
+
+		o.depends(
+			'macfilter',
+			'deny'
+		);
+
+		o=s.taboption('wifi',form.DummyValue,'_assignedgroups','Przypisane w grupach');o.cfgvalue=function(id){return uci.sections('apcontroller','group').filter(g=>L.toArray(g.wifi).includes(id)).map(g=>(g.name||g['.name'])+': '+L.toArray(g.host).map(h=>uci.get('apcontroller',h,'name')||h).join(', ')).join('; ')||'Brak przypisania';};
+		o=s.taboption('wifi',form.DummyValue,'_observedaps','SSID widoczne na AP');o.cfgvalue=function(id){const ssid=uci.get('apcontroller',id,'ssid');return (devicestatus.hosts||[]).filter(h=>h.online===1&&h['.lastcontact']<=Number(uci.get('apcontroller','@global[0]','interval')||5)*150&&(h.wifi||[]).some(w=>w.ssid===ssid)).map(h=>h.name||h.hostname||h.ipaddr).join(', ')||'Brak bieżącego odczytu tego SSID';};
+		o=s.taboption('wifi',form.MultiValue,'_targets','Przypisanie bezpośrednie do OpenWrt','Tworzy osobną grupę dla tego szablonu. Zapis publikuje przypisanie dla końcówek, gdy automatyczna publikacja jest włączona. Zapisz i wyślij wywołuje pobranie od razu.');o.modalonly=true;o.rmempty=true;
+		const writableAP=id=>(uci.get('apcontroller',id,'platform')||(devicestatus.hosts||[]).find(h=>h.section===id)?.platform)==='openwrt';
+		uci.sections('apcontroller','host').filter(h=>writableAP(h['.name'])).forEach(h=>o.value(h['.name'],(h.name||h['.name'])+' ('+h.ipaddr+')'));
+		o.cfgvalue=function(id){return L.toArray(uci.get('apcontroller','map_'+id,'host'));};o.write=function(id,value){const group='map_'+id,targets=L.toArray(value).filter(Boolean);if(!targets.length){if(uci.get('apcontroller',group,'managed_wifi')===id)uci.remove('apcontroller',group);return;}if(!uci.get('apcontroller',group))uci.add('apcontroller','group',group);uci.set('apcontroller',group,'name','Wi-Fi: '+(uci.get('apcontroller',id,'name')||id));uci.set('apcontroller',group,'managed_wifi',id);uci.set('apcontroller',group,'host',targets);uci.set('apcontroller',group,'wifi',[id]);uci.set('apcontroller',group,'delete','0');uci.set('apcontroller',group,'useadditionalscript','0');};o.remove=function(id){this.write(id,[]);};
+		o=s.taboption('wifi',form.DummyValue,'_sendtargets','Wysyłanie do wybranych AP');o.renderWidget=function(id){const option=this;return E('div',{},[...['Zapisz i wyślij','Zapisz i sprawdź (nie publikuj)'].map((label,index)=>E('button',{type:'button',class:'cbi-button '+(index?'cbi-button-action':'cbi-button-positive'),click:ui.createHandlerFn(option,async()=>{try{await saveWiFiForm(option,m);const targets=L.toArray(uci.get('apcontroller','map_'+id,'host'));await sendWiFiJob('map_'+id,targets,!!index);}catch(e){ui.addNotification(null,E('p',e.message),'error');}})},label))]);};o.modalonly=true;
+
+		/*
+		 * AP GROUP
+		 */
+
+		s = m.section(
+			form.GridSection,
+			'group',
+			_('AP Group'),
+			'Grupa łączy urządzenia AP z szablonami Wi-Fi. Wyślij zmienia konfigurację tylko zgodnych OpenWrt; UniFi i Omada mają obecnie odczyt.'
+		);
+
+		s.addremove = true;
+		s.anonymous = true;
+		s.addbtntitle = _('Add new group');
+		s.nodescriptions = true;
+		s.tab('group', _('AP Group'));
+
+		s.renderContents = function() {
+			const renderTask =
+				form.GridSection.prototype.renderContents
+					.apply(this, arguments);
+
+			return Promise.resolve(renderTask)
+				.then(nodes => {
+					const e =
+						nodes.querySelector(
+							'#cbi-apcontroller-group > h3'
+						);
+
+					if (e)
+						e.remove();
+
+					return nodes;
+				});
+		};
+
+		s.renderRowActions = function(section_id) {
+			let tdEl =
+				this.super(
+					'renderRowActions',
+					[
+						section_id,
+						_('Edit')
+					]
+				);
+
+			const send_opt = {
+				'class':
+					'btn cbi-button cbi-button-neutral',
+				'title':
+					_('Send config to devices'),
+				'click':
+					ui.createHandlerFn(
+						this,
+						'handleSendConfig',
+						section_id
+					)
+			};
+
+			dom.content(
+				tdEl.lastChild,
+				[
+					E(
+						'button',
+						send_opt,
+						_('Send')
+					),
+					tdEl.lastChild.childNodes[0],
+					tdEl.lastChild.childNodes[1]
+				]
+			);
+
+			return tdEl;
+		};
+
+		s.handleSendConfig=async function(id){
+ try{await this.map.save();await uci.save();await apcCommit('apcontroller',false);const hosts=L.toArray(uci.get('apcontroller',id,'host')).filter(host=>uci.get('apcontroller',host,'platform')==='openwrt'&&uci.get('apcontroller',host,'enabled')==='1'),checks=hosts.map(host=>{const input=E('input',{type:'checkbox',checked:true,value:host});return {input,node:E('label',{style:'display:block;margin:.3em 0'},[input,' '+(uci.get('apcontroller',host,'name')||host)+' ('+(uci.get('apcontroller',host,'ipaddr')||'?')+')'])};});
+ const run=check=>ui.createHandlerFn(this,async()=>{try{await sendWiFiJob(id,checks.filter(v=>v.input.checked).map(v=>v.input.value),check);}catch(e){ui.addNotification(null,E('p',e.message),'error');}});
+ ui.showModal('Wybierz urządzenia docelowe',[E('p',{},uci.get('apcontroller',id,'delete')==='1'?'Uwaga: pełny stan usuwa tylko sieci wcześniej zarządzane przez APController. Lokalne Wi-Fi, mesh i stacje pozostają.':'Wyśle tylko do zaznaczonych AP. Pozostałe urządzenia nie otrzymają konfiguracji.'),...checks.map(v=>v.node),E('button',{type:'button',class:'cbi-button cbi-button-action',click:run(true)},'Sprawdź bez zmian'),E('button',{type:'button',class:'cbi-button cbi-button-positive',click:run(false)},'Wyślij do wybranych'),E('button',{type:'button',class:'cbi-button',click:ui.hideModal},'Anuluj')]);
+ }catch(e){ui.addNotification(null,E('p',e.message),'error');}
+ };
+
+		o = s.taboption(
+			'group',
+			form.Value,
+			'name',
+			_('Name'),
+			_('User-readable description')
+		);
+
+		o.rmempty = false;
+
+		o = s.taboption(
+			'group',
+			form.MultiValue,
+			'host',
+			_('Selected Devices')
+		);
+
+		let any = false;
+
+		uci.sections(
+			'apcontroller',
+			'host',
+			function(host) {
+				o.value(
+					host['.name'],
+					host['name'] +
+					' (' +
+					host['ipaddr'] +
+					')'
+				);
+
+				any = true;
+			}
+		);
+
+		if (!any)
+			o.value(
+				'',
+				'(' +
+				_('no devices found') +
+				')'
+			);
+
+		o.textvalue = function(section_id) {
+			const cfgvalues =
+				L.toArray(this.map.data.get(
+					'apcontroller',
+					section_id,
+					'host'
+				));
+
+			let names = [];
+
+			cfgvalues.forEach(sec => {
+				const t =
+					this.map.data.get(
+						'apcontroller',
+						sec,
+						'name'
+					);
+
+				if (t)
+					names.push(t);
+			});
+
+			if (names.length == 0)
+				names = cfgvalues;
+
+			return names.join(', ');
+		};
+
+		o = s.taboption(
+			'group',
+			form.DummyValue,
+			'_managed_delete',
+			'Usuwanie sieci',
+			'Pełny stan usuwa sieci wcześniej zarządzane przez APController, które przestały być przypisane. Pozostałe Wi-Fi, mesh i stacje pozostają.'
+		);
+
+		o.modalonly = true;
+		o.cfgvalue = function() { return 'Tylko sieci zarządzane'; };
+
+		o = s.taboption(
+			'group',
+			form.Flag,
+			'useadditionalscript',
+			_('Use additional script'),
+			_('Use additional script before setting up a Wi-Fi')
+		);
+
+		o.modalonly = true;
+		o.rmempty = false;
+		o.default = '0';
+
+		any = false;
+
+		o = s.taboption(
+			'group',
+			form.MultiValue,
+			'wifi',
+			_('Selected Wi-Fi')
+		);
+
+		uci.sections(
+			'apcontroller',
+			'wifi',
+			function(wifi) {
+				o.value(
+					wifi['.name'],
+					wifi['name']
+				);
+
+				any = true;
+			}
+		);
+
+		if (!any)
+			o.value(
+				'',
+				'(' +
+				_('no Wi-Fi found') +
+				')'
+			);
+
+		o.textvalue = function(section_id) {
+			const cfgvalues =
+				L.toArray(this.map.data.get(
+					'apcontroller',
+					section_id,
+					'wifi'
+				));
+
+			let names = [];
+
+			cfgvalues.forEach(sec => {
+				const t =
+					this.map.data.get(
+						'apcontroller',
+						sec,
+						'name'
+					);
+
+				if (t)
+					names.push(t);
+			});
+
+			if (names.length == 0)
+				names = cfgvalues;
+
+			return names.join(', ');
+		};
+
+		s = m.section(form.GridSection, 'client', _('Nazwy klientów'), 'Własne nazwy przypisane do MAC. Mają pierwszeństwo przed nazwami DHCP i AP; nie zmieniają konfiguracji urządzenia.');
+		s.anonymous = true; s.addremove = true;
+		o = s.option(form.Value, 'mac', _('MAC Address'));
+		o.datatype = 'macaddr'; o.rmempty = false;
+		o = s.option(form.Value, 'name', _('Name'));
+		o.rmempty = false;
+
+		/*
+		 * GLOBAL SETTINGS
+		 */
+
+		s = m.section(
+			form.TypedSection,
+			'global',
+			_('Settings')
+		);
+
+		s.anonymous = true;
+
+		s.renderContents = function() {
+			const renderTask =
+				form.TypedSection.prototype.renderContents
+					.apply(this, arguments);
+
+			return Promise.resolve(renderTask)
+				.then(nodes => {
+					const e =
+						nodes.querySelector(
+							'#cbi-apcontroller-global > h3'
+						);
+
+					if (e)
+						e.remove();
+
+					return nodes;
+				});
+		};
+
+		o = s.option(
+			form.Value,
+			'path',
+			_('Data directory'),
+			_('Data storage directory')
+		);
+
+		o.rmempty = false;
+
+		o = s.option(
+			form.Value,
+			'interval',
+			_('Device Reading Interval'),
+			_('[minutes] The period in which devices will be periodically polled')
+		);
+
+		o.datatype =
+			'and(uinteger,min(1),max(59))';
+
+		o = s.option(
+			form.MultiValue,
+			'column',
+			_('Devices List Columns'),
+			_('List of columns to display in the devices list')
+		);
+
+		o.value(
+			'enabled',
+			_('Enabled')
+		);
+
+		o.value(
+			'name',
+			_('Name')
+		);
+
+		o.value(
+			'ipaddr',
+			_('Host Address')
+		);
+
+		Object.entries(
+			devicesmorecolumns
+		).forEach(([key, value]) => {
+			if (key != 'status')
+				o.value(key, value);
+		});
+
+		o = s.option(
+			form.MultiValue,
+			'clientcolumn',
+			_('Clients List Columns'),
+			_('List of columns to display in the clients list')
+		);
+
+		Object.entries(
+			clientscolumns
+		).forEach(([key, value]) => {
+			o.value(key, value);
+		});
+		o=s.option(form.Flag,'pull_auto_publish','Publikuj konfigurację po zapisaniu');o.default='1';o.rmempty=false;o.description='Przypisane OpenWrt pobierają wersję po starcie i co 2 minuty. Usunięta sieć znika tylko z zarządzanych sekcji AP. Sprawdź bez publikowania pozostawia dotychczasową wersję.';
+		o=s.option(form.Value,'pull_main','Adres głównego routera dla pobierania');o.datatype='ip4addr';o.rmempty=true;o.description='Domyślnie adres LAN głównego routera; AP musi mieć do niego dostęp SSH. Nie rozszerza reguł VPN ani firewalla.';
+		o=s.option(form.Value,'backup_mount','Nośnik backupu USB/NVMe','Istniejący punkt montowania pod /mnt. Brak nośnika zatrzymuje backup zamiast zapisu we flash.');o.default='/mnt/usbstorage';o.rmempty=false;o.validate=(id,value)=>/^\/mnt\/[a-zA-Z0-9_.-]+$/.test(value)||'Podaj punkt montowania /mnt/nazwa';
+		o=s.option(form.DynamicList,'native_subnet',_('Natywne podsieci'),_('Adresy z pozostałych podsieci są oznaczone kolorami.'));o.datatype='cidr4';o.default=['10.48.18.0/24'];
+
+		/*
+		 * ADDITIONAL SCRIPT
+		 */
+
+		s = m.section(
+			form.NamedSection,
+			'additionalscript',
+			'additionalscript',
+			_('Additional script')
+		);
+
+		s.anonymous = true;
+		s.addremove = false;
+
+		s.tab(
+			'additionalscript',
+			_('Additional script')
+		);
+
+		s.renderContents = function() {
+			const renderTask =
+				form.NamedSection.prototype.renderContents
+					.apply(this, arguments);
+
+			return Promise.resolve(renderTask)
+				.then(nodes => {
+					const scripteditor =
+						E(
+							'div',
+							{
+								'class':
+									'cbi-section cbi-section-descr'
+							},
+							[
+								E(
+									'p',
+									_(
+										'If "Use additional script" is selected in the AP Group tab, the following content will be treated as a shell script and executed before each defined Wi-Fi is created. You can use the following variables: <b>$_ENABLED</b>, <b>$_SSID</b>, <b>$_BAND</b>, <b>$_NETWORK</b>. These variables will be replaced with the appropriate values from the Wi-Fi. <b>Verify script before saving and using!</b>'
+									)
+								),
+
+								E(
+									'textarea',
+									{
+										'id':
+											'apcontrolleradditionalscript',
+										'style':
+											'width:100% !important;' +
+											'padding:5px;' +
+											'font-family:monospace;' +
+											'margin-top:.4em',
+										'spellcheck':
+											'false',
+										'wrap':
+											'off',
+										'rows':
+											25
+									},
+									[
+										additionalScript !=
+										null
+											? additionalScript
+											: ''
+									]
+								)
+							]
+						);
+
+					const e =
+						nodes.querySelector(
+							'#cbi-apcontroller-additionalscript > h3'
+						);
+
+					if (e)
+						e.parentNode.replaceChild(
+							scripteditor,
+							e
+						);
+
+					return nodes;
+				});
+		};
+
+		o = s.taboption(
+			'additionalscript',
+			form.DummyValue,
+			'_script',
+			''
+		);
+
+		o.cfgvalue = function() {};
+
+		/*
+		 * POLLING
+		 */
+
+		poll.add(
+			() => {
+				return Promise.all([callHostHints(), callAPController()])
+					.then(results => {
+						hosts = results[0] || {};
+						const livestatus = results[1];
+						updateDeviceStatus(
+							livestatus
+						);
+
+						refreshDeviceGrid();
+					});
+			},
+			63
+		);
+
+		const scannerSection=m.section(form.TypedSection,'scanner','Skanowanie');scannerSection.cfgsections=()=>[];scannerSection.render=()=>Promise.resolve(E('div',{class:'cbi-section',id:'cbi-apcontroller-scanner','data-tab':'scanner','data-tab-title':'Skanowanie'},[E('h3',{},'Skanowanie urządzeń i DHCP'),E('p',{},'Grupowanie używa masek z interfejsów, profili VPN i zakresów skanowania. 192.168.32.0/22 jest używane zarówno lokalnie w MARM, jak i w Zaciszu; zakres IP sam nie określa lokalizacji.'),scanToolbar()]));
+		for(const section of m.children)if(section instanceof form.GridSection)section.handleModalSave=async function(modalMap,ev){try{const active=dom.findClassInstance(this.getActiveModalMap());await active.save(null,true);await uci.save();await apcCommit('apcontroller');await this.handleModalCancel(modalMap,ev,true);await m.load();await m.reset();}catch(e){ui.addNotification(null,E('p',e.message),'error');}};
+		return m.render().then(root => {
+			root.classList.add('apcontroller-page');
+			const pageStyle=E('style', {}, '.apcontroller-page{min-width:0;max-width:100%;margin-left:0}.apcontroller-page .cbi-tblsection{min-width:0;max-width:100%;overflow-x:auto}.apcontroller-page table{margin-left:0!important;width:100%;font-size:.9em}.apcontroller-page table th,.apcontroller-page table td{padding:7px 6px!important;vertical-align:middle;overflow-wrap:anywhere}.apcontroller-page td[data-name="name"]{max-width:190px}.apcontroller-page td[data-name="_status"],.apcontroller-page td[data-name="ipaddr"]{white-space:nowrap}.apcontroller-page .cbi-section-actions{white-space:nowrap}.apcontroller-page .apc-package-status{white-space:pre-wrap;overflow-wrap:anywhere;max-height:250px;overflow:auto}.apc-package-actions{display:flex;gap:8px;flex-wrap:wrap}.apc-client-summary{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.apc-client-summary>div{border:1px solid var(--border-color-medium);border-radius:6px;padding:8px 16px;display:flex;gap:12px;align-items:center}.apc-client-summary strong{font-size:1.35em}.apc-subnet{border-left:4px solid;padding:2px 7px;border-radius:3px;display:inline-block}.apc-subnet-legend{display:flex;gap:14px;flex-wrap:wrap}#cbi-apcontroller-vpn table{min-width:880px}#cbi-apcontroller-vpn table td,#cbi-apcontroller-vpn table th{overflow-wrap:normal;word-break:normal}#cbi-apcontroller-vpn td[data-name=remote_subnet]{white-space:nowrap}#cbi-apcontroller-vpn .apc-package-actions{gap:4px;min-width:160px}');
+			root.querySelectorAll('#cbi-apcontroller-host table').forEach(table => { if (table.parentElement.id !== 'cbi-apcontroller-host') return; const wrap=E('div', {'class':'apc-table-scroll',style:'max-width:100%;overflow-x:auto'}); table.before(wrap); wrap.appendChild(table); });
+			return E('div',{class:'apcontroller-page'},[pageStyle,scriptsToolbar(),backupToolbar(),root]);
+		});
+	},
+
+	addFooter: function() {
+		const footer =
+			view.prototype.addFooter.apply(
+				this,
+				arguments
+			);
+
+		const actions =
+			footer.querySelector(
+				'.cbi-page-actions'
+			);
+
+		if (!actions)
+			return footer;
+
+		const refreshBtn =
+			E(
+				'button',
+				{
+					'class':
+						'cbi-button',
+
+					'click':
+						ui.createHandlerFn(
+							this,
+							async function() {
+								ui.showModal(
+									_('Refresh'),
+									[
+										E(
+											'p',
+											{
+												'class':
+													'spinning'
+											},
+											_(
+												'Please wait...'
+											)
+										)
+									]
+								);
+
+								try {
+									await fs.exec(
+										'/usr/bin/apcontroller'
+									);
+
+									await new Promise(
+										resolve =>
+											setTimeout(
+												resolve,
+												2000
+											)
+									);
+								}
+								finally {
+									ui.hideModal();
+									window.location.reload();
+								}
+							}
+						)
+				},
+				_('Refresh')
+			);
+
+		actions.appendChild(
+			refreshBtn
+		);
+
+		return footer;
+	}
+});

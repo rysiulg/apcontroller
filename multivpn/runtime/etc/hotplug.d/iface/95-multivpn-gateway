@@ -1,0 +1,2 @@
+#!/bin/sh
+case "$ACTION" in ifup|ifdown|ifupdate) /usr/bin/multivpn-gateway; /usr/bin/multivpn-mobile;; esac

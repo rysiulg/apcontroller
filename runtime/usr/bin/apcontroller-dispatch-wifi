@@ -1,0 +1,4 @@
+#!/bin/sh
+set -e
+action=${1:-};group=${2:-};targets=${3:-}
+case "$action" in start) exec /usr/bin/apcontroller-push-desired "$targets";;check) exec /usr/bin/apcontroller-sendconfig "$group" check "$targets";;*) exit 2;;esac

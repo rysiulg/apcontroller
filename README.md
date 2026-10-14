@@ -1,79 +1,50 @@
-# AP Controller - Access Point (AP) Management System for OpenWrt/LuCI
- 
-[Wersja polska](README.pl.md)
+# APController i MultiVPN Connect — repozytorium APK
 
-Refactor from Cezary repo whole apcontroller to get data from omada/ubiquity unify ap also
- 
-The application is a lightweight Access Point (AP) management system, developed as an extension for OpenWrt/LuCI. Its main purpose is to monitor network devices and automate the creation and update of Wi-Fi networks without requiring additional software packages to be installed on the access points.
- 
-<img src="https://raw.githubusercontent.com/obsy/apcontroller/refs/heads/main/img/tab-devices.png">
- 
-The application provides the following features:
-- adding and defining devices (running on OpenWrt) and storing access credentials (such as IP address, port, username, and password, URL to the GUI)
-- enabling/disabling device monitoring and presenting device operation parameters
-- list of wireless clients connected to monitored devices with Wi-Fi
-- downloading logs from the device, the ability to reboot and ping the device, and executing user-created scripts
-- defining Wi-Fi networks
-- creating AP groups by linking Wi-Fi networks and devices
-- deploying Wi-Fi configurations to devices in groups
-- defining a user script executed before setting up or updating Wi-Fi parameters
- 
-<img src="https://raw.githubusercontent.com/obsy/apcontroller/refs/heads/main/img/tab-devices-edit.png">
- 
-Device monitoring is performed periodically by a cron-executed script. For a device to be monitored, it must be enabled (the “Enabled” option) and have valid access credentials provided. The system sends a script to the AP (via scp) and executes it through ssh, which allows retrieving operational data from the access point. A device will be displayed with Offline status if it fails to provide data within twice and half the defined polling interval (e.g., 12.5 minutes if the polling cycle is set to 5 minutes).
- 
-<img src="https://raw.githubusercontent.com/obsy/apcontroller/refs/heads/main/img/tab-wifi.png">
- 
-<img src="https://raw.githubusercontent.com/obsy/apcontroller/refs/heads/main/img/tab-wifi-edit.png">
- 
-Creating new Wi-Fi configurations includes setting default interface state, selected band, SSID, encryption type, password, and binding the Wi-Fi interface to a specific network. When sending a configuration if no Wi-Fi interfaces matching the provided parameters exist, a new one will be created. If a configuration with the specified SSID, frequency band, and network assignment already exists, it will be updated (enabled/disabled, encryption type, and password). The application does not read or remove existing Wi-Fi configurations from devices. Currently, it only supports defining new wireless interfaces and updating existing ones.
- 
-Grouping allows assigning specific Wi-Fi networks to selected devices and deploying configurations. Some configuration elements may be skipped in cases where:
-- the device has no wireless interfaces,
-- the device does not have radio interfaces in the selected frequency range,
-- the device does not have a network (logical interface) defined with the given name.
- 
-The application provides simple configuration of the device polling interval and selection of displayed columns. For better usability, only necessary columns should be enabled for display.
- 
-<img src="https://raw.githubusercontent.com/obsy/apcontroller/refs/heads/main/img/tab-settings.png">
- 
-The system offers a simplified but centralized management solution for OpenWrt-based access points. With periodic monitoring, network issues can be quickly identified, while grouping and automated Wi-Fi configuration enable efficient management of multiple devices simultaneously. The application is designed as a lightweight tool, requiring minimal dependencies and minimal interference with the access points themselves.
+OpenWrt 25.12, aarch64_cortex-a53. Autorem pierwotnego APController jest **Cezary Jackiewicz ([obsy](https://github.com/obsy))**, projekt [obsy/apcontroller](https://github.com/obsy/apcontroller). Ta wersja rozwija fork [rysiulg/apcontroller](https://github.com/rysiulg/apcontroller), dodając obsługę danych producentów, pakiety APK, MultiVPN i synchronizację stanu. Zachowano źródłową licencję GPL-3.0 (pełny tekst w LICENSE); metadane naszych nowych paczek wskazują GPL-3.0-only. SSTP zachowuje własną licencję upstream. Pakiety są podpisane lokalnym kluczem; publiczne repozytorium nie zawiera rzeczywistych konfiguracji, haseł ani prywatnych kluczy.
 
-## Using key-based authentication
+## Instalacja i aktualizacja
 
-Authorization in the AP is by default performed using a username/password pair. If you are using key-based authentication, select the "Use SSH Key" option and, if necessary, specify the key file. Keys can be generated with the following command (on a router with apcontroller installed):
+Repozytorium: https://nas.marm.pl/openwrt/ap_repos/apcontroller/aarch64_cortex-a53/packages.adb . W LuCI → System → Pakiety → Configure apk należy dodać ten adres do Custom feeds. Instalator zapisuje go w /etc/apk/repositories.d/customfeeds.list i instaluje publiczny klucz po sprawdzeniu jego sumy.
+
+```sh
+wget -O /tmp/install-apcontroller.sh https://nas.marm.pl/openwrt/ap_repos/apcontroller/install.sh
+sh /tmp/install-apcontroller.sh
+apk update
+apk add luci-app-multivpn-connect
 ```
-mkdir /root/.ssh
-dropbearkey -f /root/.ssh/id_dropbear
-ssh root@192.168.1.2 "tee -a /etc/dropbear/authorized_keys" < /root/.ssh/id_dropbear.pub
-ssh root@192.168.1.3 "tee -a /etc/dropbear/authorized_keys" < /root/.ssh/id_dropbear.pub
-etc...
+
+Aktualizacja samych aplikacji: `apk add --upgrade luci-apcontroller luci-app-multivpn-connect`. Nie wymaga budowania ani wgrywania firmware. Pakiety APController to apcontroller, luci-app-apcontroller, luci-i18n-apcontroller-pl i alias luci-apcontroller. VPN jest oddzielony w multivpn-connect oraz luci-app-multivpn-connect. Repozytorium indeksuje także dokładny działający lokalny sstp-client 1.0.20-r3, aby dotychczasowe przypięcie jego sumy pozostało rozwiązywalne.
+
+## APController
+
+Nazwy klientów są aliasami MAC, mającymi pierwszeństwo przed DHCP i nazwami AP. Grupę AP tworzą hosty i szablony Wi-Fi do wysłania. Odczyt UniFi/airOS i Omada jest obsługiwany; zapis konfiguracji jest dostępny dla OpenWrt. Omada SSH udostępnia CLI, więc skrypty powłoki OpenWrt nie są wysyłane do Omada.
+
+Wi-Fi pokazuje oddzielnie planowane przypisania i AP, na których odczytano SSID. Domyślnie zapis publikuje pełny stan dla przypisanych OpenWrt; końcówki pobierają go po starcie i co 2 minuty. Zapisz i wyślij dodatkowo wywołuje pobranie od razu. Zapisz i sprawdź nie publikuje projektu konfiguracji. Dodanie, zmiana SSID i usunięcie są uzgadniane według trwałych identyfikatorów, bez kasowania niezależnych sieci AP, mesh i stacji. Opcjonalne pole VLAN przygotowuje sieć na OpenWrt w rozpoznanym układzie switch_guest/dev_guest; przy innym układzie wymagany jest dodatkowy skrypt. Nowy VLAN używa jednej przewodowej ścieżki CPU/LAN oraz STP, żeby nie dublować ścieżek przez BATMAN lub drugi port CPU. Agent zachowuje kopię network/wireless i dopisuje zmieniane konfiguracje do sysupgrade.conf. Nie zastępuje sieci zarządzającej.
+
+Skrypty do urządzeń znajdują się w /usr/share/apcontroller/scripts; akcja Wykonaj skrypt dotyczy powłoki zgodnego AP. Dodatkowy skrypt jest wykonywany przez grupę tylko po włączeniu odpowiedniej opcji. Publiczny klucz SSH można dopisać oddzielnym przyciskiem na OpenWrt/root; prywatnego klucza nie wysyła się na AP.
+
+## MultiVPN Connect
+
+Menu Usługi → MultiVPN Connect. Nowe IKE/SSTP tworzą natywny interfejs i strefę firewalla. Istniejący SSTP/WireGuard można powiązać z profilem. Wybiera się lokalną podsieć i strefę; nazwy nowego interfejsu i strefy wpisuje się w odpowiednie pola. Domyślnie dostęp inicjuje tylko lokalna sieć. Odpowiedzi na jej połączenia są dozwolone. Dostęp obustronny wymaga także tras/reguł na zdalnym routerze.
+
+IKE klient/VIP stosuje SNAT do adresu przydzielonego przez serwer. Tryb site-to-site negocjuje całe podsieci bez takiego SNAT i wymaga zgodnych selektorów/certyfikatów na drugim końcu. Różne zdalne podsieci mogą działać równocześnie.
+
+Internet IPv4 przez VPN jest opcją domyślnie wyłączoną. Obejmuje wskazaną lokalną podsieć, zachowuje trasy lokalne, wymaga internetu/NAT na zdalnym końcu, a w IKE selektora 0.0.0.0/0. DNS routera i IPv6 zachowują dotychczasową drogę. Po utracie tunelu wraca WAN; nie jest to kill switch. Opcja dla istniejącego interfejsu obsługuje SSTP; pełny tunel WireGuard ustawia się natywnie, wraz z AllowedIPs.
+
+Uruchamianie, zatrzymywanie i zastosowanie konfiguracji mają raport z czasem, kodem wyniku i stanem po akcji. Zadanie działa poza pojedynczym wywołaniem RPC. LuCI zatwierdza wyłącznie konfigurację danego modułu, zamiast uruchamiać globalne uci/apply.
+
+## Firmware i kopie
+
+Attended Sysupgrade buduje cały obraz; lokalny wpis APK nie przekazuje automatycznie repozytorium i klucza serwerowi budującemu. Serwer musi dopuścić dodatkowy feed. W tym wydaniu integracja LuCI ASU usuwa nasze pakiety z żądania serwera i dodaje skrypt ich ponownej instalacji po pierwszym uruchomieniu. Skrypt pobiera publiczny klucz, sprawdza przypiętą sumę i instaluje podpisane APK. Wymaga działającego WAN i repozytorium NAS; zachowaj prywatną konfigurację/certyfikaty. Obejmuje wyłącznie OpenWrt 25.12 i aarch64_cortex-a53. Nie wgrywa firmware ani nie restartuje routera przy aktualizacji samych aplikacji. Nie usuwa się pakietów z world tylko po to, żeby ukryć błąd. Prywatne UCI, certyfikaty, uprawnienia i skrypty lokalne wymagają kopii niezależnie od formy pakietu.
+
+## Budowanie
+
+```sh
+APC_BUILD_DIR=/mnt/usbstorage/apcontroller-build sh packaging/build-router.sh /sciezka/do/zrodel
 ```
-## Sending Configuration to Devices
-The system does not read the current configuration from devices. It only allows you to define the Wi-Fi network being broadcast and then send Wi-Fi parameters to the device. Example configuration for a network named "OpenWrt":
-- In the "Devices" tab, add all devices in the network. After saving changes, select the "Refresh" button to view the device's current operating parameters.
-- In the "Wi-Fi" tab, define a network with any name, enter "OpenWrt" as the "SSID," specify the bands on which it will broadcast, as well as the encryption type and key. For "Network," enter "lan"—this is the default logical name of the local network.
-- In the "AP Group" tab, name the group as desired, select the devices to be included in the group from the list, and select the list of Wi-Fi networks these devices will advertise.
- 
-<img src="https://raw.githubusercontent.com/obsy/apcontroller/refs/heads/main/img/tab-apgroup-edit.png">
- 
-The "Delete all" option allows you to completely delete existing Wi-Fi networks before making changes to the device. Only the configuration sections for the wireless interfaces are deleted.
-The "Use additional script" option allows you to use a custom script that will be executed before attempting to set up or modify any defined Wi-Fi network on any band.
- 
-<img src="https://raw.githubusercontent.com/obsy/apcontroller/refs/heads/main/img/tab-additionalscript.png">
- 
-This allows users to independently configure wired networks, bridges, and create their own VLANs. The script must be a valid shell script. The script can use several variables ("$_ENABLED", "$_SSID", "$_BAND", "$_NETWORK") that will contain the appropriate parameters for the Wi-Fi network being forwarded.
-- After saving the changes, select the "Send" button, which will send and execute the configuration on all enabled devices defined in this group.
- 
-<img src="https://raw.githubusercontent.com/obsy/apcontroller/refs/heads/main/img/tab-apgroup.png">
- 
-## User-Defined Scripts
-The device menu allows you to perform actions related to a specific device, which are defined as shell scripts. The default configuration includes two scripts – "Log" and "Reboot"; the user can create any script that will be executed on the specified router/AP. Scripts should be placed in the `/usr/share/apcontroller/scripts` directory.
 
-The `#desc:` comment indicates the name of the script displayed in the list of available scripts. Including `#warn:` means that before executing the script, you will be asked if you really want to execute it.
+Budowanie używa pełnych apk mkpkg/mkndx. Klucz prywatny w .signing pozostaje poza katalogiem WWW. Pakiety kopiuj przed atomową podmianą packages.adb; nie nadpisuj opublikowanej wersji inną zawartością. Źródła i historia są w source.tar.gz i apcontroller.bundle. Opis upstream/lokalnego SSTP jest w multivpn/sstp-source.
 
-## Man-in-the-middle attack
-The file `/root/.ssh/known_hosts` stores public key fingerprints of SSH services on access points (APs) that have been previously connected to. This mechanism is used to verify the identity of the host and to protect against man-in-the-middle attacks.
+## Pobieranie przez AP
 
-If the AP’s key changes (for example, after a system reinstallation or a factory reset), its fingerprint will also change. In such a case, the SSH client will display a warning about a key mismatch. To restore the connection, the appropriate entry in the `/root/.ssh/known_hosts` file must be manually removed or updated, and the new host key must then be accepted when reconnecting.
-
+[Opis zapisu, push, pobierania i usuwania sieci](docs/Pull-i-stan-docelowy.md). Klucze klientów są ograniczone do odczytu ich własnych paczek. Stare harmonogramy synchronizacji i automatycznego firmware na AP zastępuje nowy klient. Prywatne paczki konfiguracji, hasła Wi-Fi i klucze pozostają poza publicznym repozytorium.

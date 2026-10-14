@@ -1,0 +1,43 @@
+#!/bin/sh
+# Telefon -> zdalna podsieć; oddzielny NAT nie zmienia selektorów działającego IKE.
+set -e
+umask 077
+exec 7>/tmp/multivpn-mobile.lock
+flock -n 7 || exit 0
+. /lib/functions.sh
+config_load multivpn
+nets=$(ucode /usr/share/multivpn-connect/mobile.uc networks)
+mkdir -p /etc/multivpn-connect
+registry=/etc/multivpn-connect/mobile-managed
+if [ -f "$registry" ]; then while read -r id; do case "$id" in ''|*[!a-z0-9_]*) exit 2;; esac; nft delete table ip "mvpmob_$id" 2>/dev/null || true; done < "$registry"; fi
+next=$(mktemp /etc/multivpn-connect/mobile-managed.XXXXXX)
+trap 'rm -f "$next"' EXIT
+sync_mobile(){
+ local id="$1" allow iface remote type status dev vip mode set
+ config_get allow "$id" mobile_access 1
+ [ "$allow" = 1 ] && [ -n "$nets" ] || return 0
+ config_get iface "$id" interface; config_get remote "$id" remote_subnet; config_get type "$id" type
+ status=$(ubus call "network.interface.$iface" status 2>/dev/null) || return 0
+ [ "$(printf '%s' "$status" | jsonfilter -e '@.up')" = true ] || return 0
+ dev=$(printf '%s' "$status" | jsonfilter -e '@.l3_device')
+ case "$dev" in ''|*[!a-zA-Z0-9_.:-]*) return 2;; esac
+ set=$(printf '%s\n' "$nets" | awk 'BEGIN{s=""} {printf "%s%s",s,$0;s=","}')
+ if [ "$type" = ikev2 ]; then
+  [ -f "/tmp/apcontroller-vpn-$id.json" ] || return 0
+  config_get mode "$id" ike_mode vip
+  if [ "$mode" = site-to-site ]; then vip=$(ucode /usr/share/multivpn-connect/mobile.uc local-address "$id"); else vip=$(jsonfilter -i "/tmp/apcontroller-vpn-$id.json" -e '@.vip'); fi
+  case "$vip" in ''|*[!0-9.]*) echo "Brak adresu SNAT telefonu dla $id" >&2; return 2;; esac
+  nat="snat to $vip"
+ else nat=masquerade; fi
+ nft -f - <<EOF
+table ip mvpmob_$id {
+ chain phone_snat { type nat hook postrouting priority 98; policy accept;
+  oifname "$dev" ip saddr { $set } ip daddr $remote counter $nat
+ }
+}
+EOF
+ printf '%s\n' "$id" >> "$next"
+}
+ucode /usr/share/multivpn-connect/profiles.uc apply >/dev/null
+config_foreach sync_mobile vpn
+mv "$next" "$registry"

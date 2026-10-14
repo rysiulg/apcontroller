@@ -1,0 +1,1 @@
+{"ip":"192.0.2.1","cli":"EAP#\n5.2.3 Build TEST\nbr0 Link encap:Ethernet HWaddr 02:00:00:00:00:01\nath0 IEEE 802.11ng ESSID:\"TEST\"\n Frequency:2.437 GHz Access Point: 02:00:00:00:00:02\nath0 6 02-00-00-00-00-03 52M 40M -37 122s 90s\n? (192.0.2.3) at 02:00:00:00:00:03 [ether] on br0\nEAP#\n"}

@@ -1,0 +1,320 @@
+{
+    "platform": "omada",
+  
+    "commands": {
+      "system": [
+        "show version",
+        "show device-id",
+        "show uptime",
+        "show process resource",
+        "show network status"
+      ],
+  
+      "wifi": [
+        "show wifi detail"
+      ],
+  
+      "clients": [
+        "show station info"
+      ],
+  
+      "traffic": [
+        "show traffic"
+      ],
+  
+      "arp": [
+        "show arp table"
+      ]
+    },
+  
+    "values": {
+  
+      "type": {
+        "type": "string",
+        "value": "openwrt"
+      },
+  
+      "platform": {
+        "type": "string",
+        "value": "omada"
+      },
+  
+      "ipaddr": {
+        "source": "system",
+        "regex": "^[[:space:]]*inet addr:([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)",
+        "capture": 1,
+        "type": "string"
+      },
+  
+      "mac": {
+        "source": "system",
+        "regex": "HWaddr[[:space:]]*([0-9A-Fa-f:.-]+)",
+        "capture": 1,
+        "type": "string",
+        "transform": "mac"
+      },
+  
+      "software": {
+        "source": "system",
+        "regex": "^[0-9]+\\.[0-9]+\\.[0-9]+[[:space:]]+Build.*$",
+        "capture": 0,
+        "type": "string"
+      },
+  
+      "deviceid": {
+        "source": "system",
+        "regex": "^[0-9A-Fa-f]+$",
+        "capture": 0,
+        "type": "string"
+      },
+  
+      "uptime": {
+        "source": "system",
+        "regex": "up[[:space:]]+(.+)",
+        "capture": 1,
+        "type": "number",
+        "transform": "uptime"
+      },
+  
+      "load": {
+        "source": "system",
+        "regex": "load average:[[:space:]]*(.*)",
+        "capture": 1,
+        "type": "string",
+        "transform": "trim"
+      },
+  
+      "cpu": {
+        "source": "system",
+        "regex": "CPU:.*([0-9.]+)%[[:space:]]+idle",
+        "capture": 1,
+        "type": "number"
+      },
+  
+      "cpu_user": {
+        "source": "system",
+        "regex": "CPU:.*([0-9.]+)%[[:space:]]+usr",
+        "capture": 1,
+        "type": "number"
+      },
+  
+      "cpu_sys": {
+        "source": "system",
+        "regex": "CPU:.*([0-9.]+)%[[:space:]]+sys",
+        "capture": 1,
+        "type": "number"
+      },
+  
+      "cpu_idle": {
+        "source": "system",
+        "regex": "CPU:.*([0-9.]+)%[[:space:]]+idle",
+        "capture": 1,
+        "type": "number"
+      },
+  
+      "cpu_sirq": {
+        "source": "system",
+        "regex": "CPU:.*([0-9.]+)%[[:space:]]+sirq",
+        "capture": 1,
+        "type": "number"
+      },
+  
+      "memory_used": {
+        "source": "system",
+        "regex": "Mem:.*([0-9]+)K[[:space:]]+used",
+        "capture": 1,
+        "type": "number"
+      },
+  
+      "memory_free": {
+        "source": "system",
+        "regex": "Mem:.*([0-9]+)K[[:space:]]+free",
+        "capture": 1,
+        "type": "number"
+      },
+  
+      "memory_shared": {
+        "source": "system",
+        "regex": "Mem:.*([0-9]+)K[[:space:]]+shrd",
+        "capture": 1,
+        "type": "number"
+      },
+  
+      "memory_buffers": {
+        "source": "system",
+        "regex": "Mem:.*([0-9]+)K[[:space:]]+buff",
+        "capture": 1,
+        "type": "number"
+      },
+  
+      "memory_cached": {
+        "source": "system",
+        "regex": "Mem:.*([0-9]+)K[[:space:]]+cached",
+        "capture": 1,
+        "type": "number"
+      }
+    },
+  
+    "arrays": {
+  
+      "wifi": {
+        "source": "wifi",
+  
+        "record": {
+          "regex": "^[[:space:]]*(ath[0-9]+):.*IEEE[[:space:]]+802\\.11",
+          "capture": 1,
+          "key": "ifname"
+        },
+  
+        "fields": {
+  
+          "ifname": {
+            "record": true,
+            "type": "string"
+          },
+  
+          "ssid": {
+            "regex": "ESSID:\"([^\"]*)\"",
+            "capture": 1,
+            "type": "string"
+          },
+  
+          "frequency": {
+            "regex": "Frequency:[[:space:]]*([0-9.]+)[[:space:]]*GHz",
+            "capture": 1,
+            "type": "string",
+            "transform": "frequency"
+          },
+  
+          "band": {
+            "source": "frequency",
+            "type": "string",
+            "lookup": {
+              "2.": "2g",
+              "5.": "5g",
+              "6.": "6g"
+            }
+          },
+  
+          "channel": {
+            "regex": "Channel:[[:space:]]*([0-9]+)",
+            "capture": 1,
+            "type": "number"
+          },
+  
+          "bssid": {
+            "regex": "Access Point:[[:space:]]*([0-9A-Fa-f:.-]+)",
+            "capture": 1,
+            "type": "string",
+            "transform": "mac"
+          },
+  
+          "wifi": {
+            "regex": "IEEE[[:space:]]+802\\.11(be|ax|ac|ng|n|g|a|b)",
+            "capture": 1,
+            "type": "number",
+            "transform": "wifi_generation"
+          }
+        }
+      },
+  
+      "clients": {
+        "source": "clients",
+  
+        "record": {
+          "regex": "^[[:space:]]*[^[:space:]]+[[:space:]]+([0-9A-Fa-f:.-]{12,17})[[:space:]]+",
+          "capture": 1,
+          "key": "mac"
+        },
+  
+        "fields": {
+  
+          "mac": {
+            "record": true,
+            "type": "string",
+            "transform": "mac"
+          },
+  
+          "ap": {
+            "regex": "^[[:space:]]*(ath[0-9]+)",
+            "capture": 1,
+            "type": "string"
+          },
+  
+          "channel": {
+            "regex": "^[[:space:]]*[0-9]+[[:space:]]+([0-9]+)[[:space:]]+[0-9A-Fa-f:.-]{12,17}",
+            "capture": 1,
+            "type": "number"
+          },
+  
+          "txrate": {
+            "regex": "[0-9A-Fa-f:.-]{12,17}[[:space:]]+([^[:space:]]+)",
+            "capture": 1,
+            "type": "string"
+          },
+  
+          "rxrate": {
+            "regex": "[0-9A-Fa-f:.-]{12,17}[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:]]+)",
+            "capture": 1,
+            "type": "string"
+          },
+  
+          "signal": {
+            "regex": "[0-9A-Fa-f:.-]{12,17}[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+(-?[0-9]+)",
+            "capture": 1,
+            "type": "number"
+          },
+  
+          "connected": {
+            "regex": "[0-9A-Fa-f:.-]{12,17}[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+-?[0-9]+[[:space:]]+([^[:space:]]+)",
+            "capture": 1,
+            "type": "number",
+            "transform": "seconds"
+          },
+  
+          "idle": {
+            "regex": "[0-9A-Fa-f:.-]{12,17}[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+-?[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:]]+)",
+            "capture": 1,
+            "type": "number",
+            "transform": "seconds"
+          },
+  
+          "ipaddr": {
+            "type": "string",
+            "value": ""
+          },
+  
+          "name": {
+            "type": "string",
+            "value": ""
+          },
+  
+          "hostname": {
+            "type": "string",
+            "value": ""
+          },
+  
+          "rx": {
+            "type": "number",
+            "value": 0
+          },
+  
+          "tx": {
+            "type": "number",
+            "value": 0
+          },
+  
+          "rx_bytes": {
+            "type": "number",
+            "value": 0
+          },
+  
+          "tx_bytes": {
+            "type": "number",
+            "value": 0
+          }
+        }
+      }
+    }
+  }
+  

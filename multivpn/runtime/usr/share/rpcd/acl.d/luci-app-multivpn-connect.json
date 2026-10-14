@@ -1,0 +1,43 @@
+{
+  "luci-app-multivpn-connect": {
+    "description": "Manage named VPN profiles",
+    "read": {
+      "uci": [
+        "multivpn",
+        "network",
+        "firewall"
+      ],
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/multivpn-connect": [
+          "exec"
+        ],
+        "/usr/bin/multivpn-job": [
+          "exec"
+        ]
+      }
+    },
+    "write": {
+      "uci": [
+        "multivpn"
+      ],
+      "ubus": {
+        "file": [
+          "exec"
+        ]
+      },
+      "file": {
+        "/usr/bin/multivpn-connect": [
+          "exec"
+        ],
+        "/usr/bin/multivpn-job": [
+          "exec"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"ip":"192.0.2.1","data":{"mca":{"mac":"02:00:00:00:00:01","hostname":"AP test","model":"TEST","version":"1.0","uptime":10,"vap_table":[{"name":"ath0","essid":"SSID \"quote\" \\ backslash","channel":6,"bssid":"02:00:00:00:00:02","sta_table":[{"mac":"02:00:00:00:00:03","hostname":"Client \"test\"","ip":"192.0.2.3","signal":-60,"tx_retries":7,"tx_packets":9}]}]}}}

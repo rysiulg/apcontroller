@@ -1,0 +1,64 @@
+#!/bin/sh
+# Jawna lista AP, sprawdzenie przed zapisem i raport błędu zamiast samego ERROR.
+set -e
+umask 077
+SEC=${1:-};MODE=${2:-verbose};ONLY=${3:-}
+case "$SEC:$ONLY" in *[!a-zA-Z0-9_:,]*) echo 'Nieprawidłowy identyfikator grupy/AP' >&2;exit 2;; esac
+[ -n "$SEC" ] && [ "$(uci -q get "apcontroller.$SEC")" = group ] || { echo 'Brak przypisanej grupy Wi-Fi' >&2;exit 2; }
+. /usr/share/libubox/jshn.sh
+. /usr/share/apcontroller/lib/ssh.sh
+. /usr/share/apcontroller/lib/network-vlan.sh
+exec 8>/tmp/apcontroller-sendconfig.lock
+flock -n 8 || { echo 'Trwa inne wysyłanie Wi-Fi' >&2;exit 1; }
+work=$(mktemp -d /tmp/apc-send.XXXXXX)
+trap 'rm -rf "$work"' EXIT
+HOSTS=$(uci -q get "apcontroller.$SEC.host");WIFIS=$(uci -q get "apcontroller.$SEC.wifi")
+[ -n "$HOSTS" ] && [ -n "$WIFIS" ] || { echo 'Wybierz konkretne AP i szablon Wi-Fi' >&2;exit 2; }
+if [ -n "$ONLY" ]; then
+ selected=$(printf '%s' "$ONLY" | tr ',' ' ')
+ for host in $selected; do case " $HOSTS " in *" $host "*) ;; *) echo 'AP nie należy do wybranej grupy' >&2;exit 2;; esac;done
+ HOSTS=$selected
+fi
+json_init
+DELETE=$(uci -q get "apcontroller.$SEC.delete" || echo 0);json_add_int delete "$DELETE"
+json_add_array wifis
+for WIFI in $WIFIS; do
+ [ "$(uci -q get "apcontroller.$WIFI")" = wifi ] || exit 2
+ NETWORK=$(uci -q get "apcontroller.$WIFI.network");VLAN=$(uci -q get "apcontroller.$WIFI.vlan_id" || true);AUTO=$(uci -q get "apcontroller.$WIFI.vlan_auto" || echo 1)
+ [ "$AUTO" != 1 ] || VLAN=$(apc_network_vlan "$NETWORK" || true)
+ for BAND in $(uci -q get "apcontroller.$WIFI.band"); do
+  json_add_object;json_add_string network "$NETWORK";json_add_string vlan_id "$VLAN"
+  for option in ssid encryption key macfilter; do value=$(uci -q get "apcontroller.$WIFI.$option" || true);json_add_string "$option" "$value";done
+  for option in enabled hidden isolate; do value=$(uci -q get "apcontroller.$WIFI.$option" || echo 0);json_add_int "$option" "$value";done
+  json_add_string band "$BAND";json_add_array maclist
+  for mac in $(uci -q get "apcontroller.$WIFI.maclist" || true); do json_add_string '' "$mac";done
+  json_close_array;json_close_object
+ done
+done
+json_close_array;json_dump > "$work/payload"
+USEAS=$(uci -q get "apcontroller.$SEC.useadditionalscript" || echo 0)
+FAILED=0
+for HOST in $HOSTS; do
+ ip=$(uci -q get "apcontroller.$HOST.ipaddr" || true);name=$(uci -q get "apcontroller.$HOST.name" || echo "$HOST")
+ if [ "$(uci -q get "apcontroller.$HOST.enabled" || true)" != 1 ]; then echo "$name ($ip): ERROR — AP wyłączone w kontrolerze";FAILED=1;continue;fi
+ user=$(uci -q get "apcontroller.$HOST.username" || true);pass=$(uci -q get "apcontroller.$HOST.password" || true);port=$(uci -q get "apcontroller.$HOST.port" || echo 22);key=$(uci -q get "apcontroller.$HOST.keyfile" || echo /root/.ssh/id_dropbear);use=$(uci -q get "apcontroller.$HOST.usekeyfile" || echo 0)
+ remote_exec(){ apc_ssh_exec "$ip" "$port" "$user" "$pass" "$key" "$use" "$1"; }
+ remote_put(){ apc_ssh_pipe "$ip" "$port" "$user" "$pass" "$key" "$use" "umask 077; cat > '$remote/$2'" < "$1"; }
+ log="$work/$HOST.log"
+ if ! platform=$(remote_exec 'if [ -f /etc/openwrt_release ]; then echo openwrt; elif [ -f /etc/ubnt_version ] || command -v mca-cli >/dev/null; then echo ubiquiti; else echo unsupported; fi' 2> "$log"); then echo "$name ($ip): ERROR — SSH";cat "$log";FAILED=1;continue;fi
+ if [ "$platform" != openwrt ]; then echo "$name ($ip) [$platform]: ERROR — wymagany adapter producenta/kontrolera, nie wysłano konfiguracji";FAILED=1;continue;fi
+ remote=$(remote_exec 'umask 077; mktemp -d /tmp/apc-wifi.XXXXXX' 2>> "$log") || { echo "$name ($ip): ERROR — katalog roboczy SSH";cat "$log";FAILED=1;continue; }
+ printf '%s' "$remote" | grep -Eq '^/tmp/apc-wifi\.[A-Za-z0-9]+$' || exit 2
+ uploaded=1
+ remote_put "$work/payload" payload 2>> "$log" || uploaded=0
+ remote_put /usr/share/apcontroller/platforms/openwrt/setconfig setconfig 2>> "$log" || uploaded=0
+ remote_put /usr/share/apcontroller/lib/network-vlan.sh vlan.sh 2>> "$log" || uploaded=0
+ if [ "$USEAS" = 1 ]; then remote_put /usr/share/apcontroller/apcontroller.user apcontroller.user 2>> "$log" || uploaded=0;remote_put /usr/share/apcontroller/apcontroller-agent-as apcontroller-agent-as 2>> "$log" || uploaded=0;fi
+ if [ "$uploaded" = 0 ]; then echo "$name ($ip): ERROR — transfer";cat "$log";FAILED=1
+ elif ! remote_exec "APC_PREFLIGHT=1 sh '$remote/setconfig' '$remote/payload'" >> "$log" 2>&1; then echo "$name ($ip): ERROR — sprawdzenie konfiguracji";cat "$log";FAILED=1
+ elif [ "$MODE" = check ]; then echo "$name ($ip) [openwrt]: OK — sieć/VLAN/radio sprawdzone; bez zmian";grep '^APC:' "$log" || true
+ elif remote_exec "sh '$remote/setconfig' '$remote/payload'" >> "$log" 2>&1; then echo "$name ($ip) [openwrt]: OK";grep '^APC:' "$log" || true
+ else echo "$name ($ip) [openwrt]: ERROR — zastosowanie";cat "$log";FAILED=1;fi
+ remote_exec "rm -f '$remote/payload' '$remote/setconfig' '$remote/vlan.sh' '$remote/apcontroller.user' '$remote/apcontroller-agent-as'; rmdir '$remote'" >/dev/null 2>> "$log" || true
+done
+exit "$FAILED"

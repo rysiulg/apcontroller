@@ -1,0 +1,47 @@
+#!/bin/sh
+set -e
+id=${1:-};case "$id" in ''|*[!a-z0-9_]*|?????????????*) exit 2;; esac
+. /lib/functions.sh
+config_load multivpn
+config_get iface "$id" interface; config_get localnet "$id" local_subnet; config_get remote "$id" remote_subnet
+config_get ikemode "$id" ike_mode vip
+config_get gateway "$id" default_gateway 0
+natremote=$remote; [ "$gateway" != 1 ] || natremote=0.0.0.0/0
+ucode /usr/share/multivpn-connect/profiles.uc apply "$id" >/dev/null
+table="apcvpn_$id"; state="/tmp/apcontroller-vpn-$id.json"
+case "${PLUTO_VERB:-}" in
+ up-client|up-host)
+    if [ "$ikemode" = site-to-site ]; then
+        ip route replace "$remote" dev "$iface"
+        nft delete table ip "$table" 2>/dev/null || true
+        umask 077; printf '{"mode":"site-to-site","updated":%s}\n' "$(date +%s)" > "$state"
+        /usr/bin/multivpn-mobile
+        logger -t multivpn-connect "IKE site-to-site $id connected"
+        exit 0
+    fi
+    vip=${PLUTO_MY_SOURCEIP4_1:-${PLUTO_MY_SOURCEIP:-}}
+    case "$vip" in ''|*[!0-9.]*) logger -t apcontroller-vpn "No IPv4 VIP for $id"; exit 1;; esac
+    ip route replace "$remote" dev "$iface" src "$vip"
+    nft delete table ip "$table" 2>/dev/null || true
+    nft -f - <<EOF
+table ip $table {
+ chain vpn_snat { type nat hook postrouting priority 99; policy accept;
+  oifname "$iface" ip saddr $localnet ip daddr $natremote snat to $vip
+ }
+}
+EOF
+    umask 077
+    printf '{"vip":"%s","updated":%s}\n' "$vip" "$(date +%s)" > "$state"
+    /usr/bin/multivpn-mobile
+    /usr/bin/multivpn-gateway
+    logger -t apcontroller-vpn "IKE profile $id connected"
+    ;;
+ down-client|down-host)
+    ip route del "$remote" dev "$iface" 2>/dev/null || true
+    nft delete table ip "$table" 2>/dev/null || true
+    rm -f "$state"
+    /usr/bin/multivpn-mobile
+    /usr/bin/multivpn-gateway
+    logger -t apcontroller-vpn "IKE profile $id disconnected"
+    ;;
+esac

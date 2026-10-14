@@ -1,0 +1,3 @@
+#!/bin/sh
+# Compatibility for callers of the retired AP-side synchronization script.
+exec /usr/bin/apcontroller-pull "$@"

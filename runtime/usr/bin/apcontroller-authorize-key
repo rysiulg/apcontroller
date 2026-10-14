@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+id=${1:-}; case "$id" in ''|*[!a-zA-Z0-9_]*) echo 'Nieprawidlowy identyfikator AP' >&2; exit 2;; esac
+[ "$(uci -q get apcontroller.$id)" = host ] || exit 2
+APC_STANDALONE=1
+. /usr/share/apcontroller/lib/ssh.sh
+ip=$(uci -q get apcontroller.$id.ipaddr); platform=$(uci -q get apcontroller.$id.platform || true)
+[ -n "$platform" ] || platform=$(cat "$(uci -q get apcontroller.@global[0].path || echo /tmp/apcontroller)/$ip-$id.platform" 2>/dev/null || true)
+[ "$platform" = openwrt ] || { echo 'Dopisywanie klucza obslugiwane tylko na OpenWrt' >&2; exit 2; }
+username=$(uci -q get apcontroller.$id.username)
+[ "$username" = root ] || { echo 'Ta operacja wymaga loginu root na OpenWrt' >&2; exit 2; }
+key=$(uci -q get apcontroller.$id.authorizedkey || true)
+printf '%s\n' "$key" | ucode -e 'import {readfile} from "fs";let s=trim(readfile("/dev/stdin"));if(!match(s,/^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+\/=]+( [^\r\n]*)?$/))die("Wymagany pojedynczy publiczny klucz SSH\n");' || exit 2
+port=$(uci -q get apcontroller.$id.port || true); password=$(uci -q get apcontroller.$id.password || true); private=$(uci -q get apcontroller.$id.keyfile || true); usekey=$(uci -q get apcontroller.$id.usekeyfile || true)
+command='set -e; [ -f /etc/openwrt_release ] || exit 2; umask 077; mkdir -p /etc/dropbear; file=/etc/dropbear/authorized_keys; touch "$file"; IFS= read -r key; if ! grep -qxF "$key" "$file"; then cp "$file" "$file.apcontroller-$(date +%s).bak"; printf "\n%s\n" "$key" >> "$file"; fi; chmod 600 "$file"; echo "Klucz publiczny dopisany; pozostale metody logowania zachowane"'
+printf '%s\n' "$key" | apc_ssh_pipe "$ip" "$port" "$username" "$password" "$private" "$usekey" "$command"

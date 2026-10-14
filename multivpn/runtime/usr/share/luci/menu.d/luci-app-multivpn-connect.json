@@ -1,0 +1,18 @@
+{
+	"admin/services/multivpn-connect": {
+		"title": "MultiVPN Connect",
+		"order": 61,
+		"action": {
+			"type": "view",
+			"path": "multivpn-connect/profiles"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-multivpn-connect"
+			],
+			"uci": {
+				"multivpn": true
+			}
+		}
+	}
+}
