@@ -13,7 +13,7 @@ let hosts=[],groups=[],selected=only?split(only,','):[];c.foreach('apcontroller'
 for(let id in selected)if(!length(filter(hosts,h=>h['.name']==id)))die('Nieznane AP '+id);
 let jobs=[],adoption=json(readfile(base+'/adoption.json')||'{}');
 for(let h in hosts){
- let id=h['.name'];if(h.enabled!='1'||h.platform!='openwrt'||(length(selected)&&index(selected,id)<0))continue;if(!match(id,/^[A-Za-z0-9_]+$/))die('Nieprawidłowy identyfikator AP');
+ let id=h['.name'];if(h.enabled!='1'||h.platform!='openwrt'||h.pull_sync!='1'||(length(selected)&&index(selected,id)<0))continue;if(!match(id,/^[A-Za-z0-9_]+$/))die('Nieprawidłowy identyfikator AP');
  let wifi={},script=false;
  for(let g in groups){if(index(arr(g.host),id)<0)continue;for(let wid in arr(g.wifi)){let w=c.get_all('apcontroller',wid);if(!w||w['.type']!='wifi')continue;if(!match(wid,/^[A-Za-z0-9_]+$/))die('Nieprawidłowy identyfikator Wi-Fi');let extra=g.useadditionalscript=='1';script=script||extra;
   for(let band in arr(w.band)){let key=wid+':'+band,v={id:wid,band:band,network:w.network||'lan',vlan_id:(w.vlan_auto??'1')=='1'?network_vlan(w.network||'lan'):(w.vlan_id||''),ssid:w.ssid||'',encryption:w.encryption||'none',key:w.key||'',enabled:int(w.enabled??'1'),hidden:int(w.hidden||'0'),isolate:int(w.isolate||'0'),macfilter:w.macfilter||'disable',maclist:arr(w.maclist),use_as:extra?1:0};if(wifi[key]?.use_as)v.use_as=1;wifi[key]=v;}

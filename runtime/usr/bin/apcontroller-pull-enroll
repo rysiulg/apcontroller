@@ -16,15 +16,22 @@ for file in /etc/dropbear/dropbear_*_host_key; do [ ! -f "$file" ] || dropbearke
 [ -s "$serverkeys" ] || exit 2
 version=$( { sha256sum /usr/share/apcontroller/pull-agent /usr/share/apcontroller/pull-init "$serverkeys";printf '%s\n' "$main"; } | sha256sum | cut -d ' ' -f1)
 enroll_host(){
- local id="$1" enabled platform ip user pass port key use remote version_old pub
+ local id="$1" enabled platform ip user pass port key use remote version_old pub sync setup
  case "$id" in ''|*[!a-zA-Z0-9_]*) return 1;;esac
  [ "$selected" = all ] || { case ",$selected," in *",$id,"*) ;;*) return 0;;esac; }
  config_get enabled "$id" enabled;config_get platform "$id" platform;[ "$enabled:$platform" = 1:openwrt ] || return 0
- [ -s /etc/apcontroller/desired/$id/current.tar ] || return 0
  config_get ip "$id" ipaddr;config_get user "$id" username;config_get pass "$id" password;config_get port "$id" port 22;config_get key "$id" keyfile;config_get use "$id" usekeyfile 0
- [ "$user" = root ] || { echo "$id: pobieranie wymaga przygotowania klienta z uprawnieniami root";return 0; }
+ config_get sync "$id" pull_sync 0;config_get setup "$id" pull_setup_credentials 0
+ if [ "$setup" = 1 ]; then config_get user "$id" pull_username root;config_get pass "$id" pull_password;key='';use=0;fi
  rexec(){ apc_ssh_exec "$ip" "$port" "$user" "$pass" "$key" "$use" "$1"; }
  rput(){ apc_ssh_pipe "$ip" "$port" "$user" "$pass" "$key" "$use" "umask 077; cat > '$1'" < "$2"; }
+ if [ "$sync" != 1 ]; then
+  [ -f /etc/apcontroller/pull-server/$id.pub ] && [ ! -f /etc/apcontroller/pull-server/$id.disabled ] || return 0
+  rexec 'if [ -x /etc/init.d/apcontroller-pull ]; then /etc/init.d/apcontroller-pull disable; /etc/init.d/apcontroller-pull stop;fi' || return 0
+  touch /etc/apcontroller/pull-server/$id.disabled;echo "$id ($ip): synchronizacja wyłączona";return 0
+ fi
+ [ -s /etc/apcontroller/desired/$id/current.tar ] || return 0
+ [ "$user" = root ] || { echo "$id: pobieranie wymaga przygotowania klienta z uprawnieniami root";return 0; }
  if ! version_old=$(rexec 'test -f /etc/openwrt_release; cat /etc/apcontroller/pull/agent-version 2>/dev/null || true'); then echo "$id ($ip): niedostÄ™pny, przygotowanie zostanie ponowione";return 0;fi
  if [ "$version_old" != "$version" ]; then
   rexec 'set -e; test -f /etc/openwrt_release; command -v dbclient >/dev/null; command -v dropbearkey >/dev/null; mkdir -p /etc/apcontroller/pull /etc/apcontroller/legacy-backup/r21 /root/.ssh /scripts; chmod 700 /etc/apcontroller/pull; if [ ! -f /etc/apcontroller/pull/client.key ]; then dropbearkey -t rsa -s 2048 -f /etc/apcontroller/pull/client.key >/dev/null 2>&1;fi; chmod 600 /etc/apcontroller/pull/client.key; test -f /etc/apcontroller/legacy-backup/r21/crontab || cp /etc/crontabs/root /etc/apcontroller/legacy-backup/r21/crontab' || return 0
@@ -48,6 +55,7 @@ enroll_host(){
  if [ "$version_old" != "$version" ]; then
   rexec 'set -e; awk '\''/^[[:space:]]*#/ {print;next} /\/(root|scripts)\/(sync-wireless-smart|make_backup_usb|autoupdate)\.sh/ {print "# retired APController r21: "$0;next} {print}'\'' /etc/crontabs/root > /etc/crontabs/root.next; mv /etc/crontabs/root.next /etc/crontabs/root; chmod 600 /etc/crontabs/root; for name in sync-wireless-smart.sh make_backup_usb.sh; do test ! -f /root/$name || test -f /etc/apcontroller/legacy-backup/r21/$name || cp -p /root/$name /etc/apcontroller/legacy-backup/r21/$name;done; cp /etc/apcontroller/pull/legacy-sync-compat /root/sync-wireless-smart.sh; cp /etc/apcontroller/pull/legacy-sync-compat /scripts/sync-wireless-smart.sh; cp /etc/apcontroller/pull/make_backup_usb.sh /root/make_backup_usb.sh; chmod 755 /root/sync-wireless-smart.sh /scripts/sync-wireless-smart.sh /root/make_backup_usb.sh; touch /etc/autobackup.disabled; for path in /etc/apcontroller/ /usr/bin/apcontroller-pull /etc/init.d/apcontroller-pull /root/sync-wireless-smart.sh /scripts/sync-wireless-smart.sh /root/make_backup_usb.sh /root/.ssh/known_hosts /etc/crontabs/root /etc/autobackup.disabled; do grep -qxF "$path" /etc/sysupgrade.conf || echo "$path" >> /etc/sysupgrade.conf;done; /etc/init.d/cron reload; /etc/init.d/apcontroller-pull enable; /etc/init.d/apcontroller-pull restart' || return 0
  fi
+ if [ -f /etc/apcontroller/pull-server/$id.disabled ]; then rexec '/etc/init.d/apcontroller-pull enable; /etc/init.d/apcontroller-pull start' || return 0;rm /etc/apcontroller/pull-server/$id.disabled;fi
  echo "$id ($ip): klient pobierania gotowy"
 }
 config_foreach enroll_host host
