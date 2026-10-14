@@ -75,6 +75,9 @@
         ],
         "/usr/bin/apcontroller-backup": [
           "exec"
+        ],
+        "/usr/bin/apcontroller-desired": [
+          "exec"
         ]
       },
       "ubus": {

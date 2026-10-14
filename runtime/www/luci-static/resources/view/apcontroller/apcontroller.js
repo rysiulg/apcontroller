@@ -8,7 +8,11 @@
 'require uci';
 'require ui';
 'require view';
-const apcCommit=rpc.declare({object:'uci',method:'commit',params:['config'],reject:true});
+const apcCommitRPC=rpc.declare({object:'uci',method:'commit',params:['config'],reject:true});
+async function apcCommit(config,publish=true){
+ if(config==='apcontroller'){const valid=new Set(uci.sections('apcontroller','wifi').map(w=>w['.name']));for(const g of uci.sections('apcontroller','group')){if(g.managed_wifi&&!valid.has(g.managed_wifi)){uci.remove('apcontroller',g['.name']);continue;}const refs=L.toArray(g.wifi).filter(id=>valid.has(id));if(refs.length)uci.set('apcontroller',g['.name'],'wifi',refs);else uci.unset('apcontroller',g['.name'],'wifi');}await uci.save();}
+ await apcCommitRPC(config);if(config==='apcontroller'&&publish&&uci.sections('apcontroller','global')[0]?.pull_auto_publish!=='0'){const r=await fs.exec('/usr/bin/apcontroller-desired',['publish']);if(r.code)throw new Error(r.stderr||r.stdout);}
+}
 
 let callHostHints;
 let callAPControllerActivity;
@@ -82,7 +86,7 @@ function scanToolbar(){
  const button=E('button',{type:'button',class:'cbi-button cbi-button-action',click:async()=>{if(busy||!select.value)return;busy=true;button.disabled=true;try{const r=await fs.exec('/usr/bin/apcontroller-scan',['start',select.value]);if(r.code)throw new Error(r.stderr||r.stdout);details.open=true;summary.textContent='Skanowanie rozpoczęte…';for(let i=0;i<60;i++){await new Promise(resolve=>setTimeout(resolve,2000));await refresh();const status=await fs.exec('/usr/bin/apcontroller-scan',['report']);if(!JSON.parse(status.stdout).running)break;}}catch(e){summary.textContent=e.message;}finally{busy=false;button.disabled=false;}}},'Skanuj urządzenia');refresh();return E('div',{'class':'apc-scanner'},[select,button,summary,details]);
 }
 async function saveWiFiForm(option,map){
- const active=option.map||map;await active.save(null,true);await uci.save();await apcCommit('apcontroller');
+ const active=option.map||map;await active.save(null,true);await uci.save();await apcCommit('apcontroller',false);
 }
 async function sendWiFiJob(group,targets,check){
  if(!targets.length)throw new Error('Wybierz konkretne urządzenia AP.');
@@ -156,6 +160,7 @@ return view.extend({
 		]);
 	},
 
+	handleSave: function(ev) { return this.handleSaveApply(ev); },
 	handleSaveApply: function(ev, mode) {
 		const textarea = document.querySelector('#apcontrolleradditionalscript');
 
@@ -2532,7 +2537,7 @@ return view.extend({
 		uci.sections('apcontroller','wifi').forEach(w=>{if(w.network&&!networkChoices.has(w.network))networkChoices.set(w.network,w.network+' — szablon Wi-Fi');});
 		(devicestatus.hosts||[]).filter(h=>h.platform==='openwrt'||h.type==='openwrt').forEach(h=>String(h.network_names||'').split(/\s+/).filter(Boolean).forEach(n=>{if(!networkChoices.has(n))networkChoices.set(n,n+' — AP '+(h.name||h.ipaddr));}));
 		for(const [name,label] of networkChoices)o.value(name,label);
-		o.description='Wybierz istniejącą sieć lub wpisz nową nazwę. To interfejs na docelowym AP, nie SSID. Nowa sieć wymaga VLAN-u albo przygotowania na AP. Zapis nie publikuje Wi-Fi; dopiero Zapisz i wyślij.';
+		o.description='Wybierz istniejącą sieć lub wpisz nową nazwę. To interfejs na docelowym AP, nie SSID. Nowa sieć wymaga VLAN-u albo przygotowania na AP. Zapis publikuje stan dla przypisanych OpenWrt, jeśli włączono automatyczną publikację. Zapisz i wyślij dodatkowo wywołuje pobranie od razu.';
 		o=s.taboption('wifi',form.Flag,'vlan_auto','VLAN z wybranego interfejsu routera');o.default='1';o.modalonly=true;o.rmempty=false;o.description='Odczytuje tagowanie istniejącego interfejsu. Na AP używa zgodnej sieci; przy innym VLAN-ie przerywa wysyłanie.';
 		o=s.taboption('wifi',form.Value,'vlan_id','VLAN na AP (opcjonalnie)','Przy wysyłaniu przygotuj interfejs bez adresu i tagowanie jak istniejący VLAN gościnny. Obsługiwany wykryty układ switch_guest/dev_guest na OpenWrt; inne układy wymagają dodatkowego skryptu. Nie zmienia VLAN-ów na głównym routerze.');o.datatype='range(1,4094)';o.modalonly=true;o.rmempty=true;o.depends('vlan_auto','0');
 		const vlanChoices=new Set();for(const type of ['device','switch_vlan','bridge-vlan'])uci.sections('network',type).forEach(n=>{const v=n.vid||(type!=='device'?n.vlan:null);if(Number(v)>=2&&Number(v)<=4094)vlanChoices.add(String(v));});uci.sections('apcontroller','wifi').forEach(w=>{if(w.vlan_id)vlanChoices.add(String(w.vlan_id));});(devicestatus.hosts||[]).forEach(h=>String(h.vlan_ids||'').split(/\s+/).filter(v=>Number(v)>=2&&Number(v)<=4094).forEach(v=>vlanChoices.add(v)));for(const vid of [...vlanChoices].sort((a,b)=>Number(a)-Number(b)))o.value(vid,'VLAN '+vid);o.description='Wybierz znany VLAN lub wpisz nowy (2–4094). Zapisz i wyślij utworzy sieć/VLAN tylko na zgodnych OpenWrt w rozpoznanym układzie portów; uplink i główny router muszą przenosić ten VLAN. Puste pole używa istniejącej sieci AP.';
@@ -2586,11 +2591,11 @@ return view.extend({
 
 		o=s.taboption('wifi',form.DummyValue,'_assignedgroups','Przypisane w grupach');o.cfgvalue=function(id){return uci.sections('apcontroller','group').filter(g=>L.toArray(g.wifi).includes(id)).map(g=>(g.name||g['.name'])+': '+L.toArray(g.host).map(h=>uci.get('apcontroller',h,'name')||h).join(', ')).join('; ')||'Brak przypisania';};
 		o=s.taboption('wifi',form.DummyValue,'_observedaps','SSID widoczne na AP');o.cfgvalue=function(id){const ssid=uci.get('apcontroller',id,'ssid');return (devicestatus.hosts||[]).filter(h=>h.online===1&&h['.lastcontact']<=Number(uci.get('apcontroller','@global[0]','interval')||5)*150&&(h.wifi||[]).some(w=>w.ssid===ssid)).map(h=>h.name||h.hostname||h.ipaddr).join(', ')||'Brak bieżącego odczytu tego SSID';};
-		o=s.taboption('wifi',form.MultiValue,'_targets','Przypisanie bezpośrednie do OpenWrt','Tworzy osobną grupę dla tego szablonu. Zapis przypisania nie wysyła konfiguracji. Istniejące grupy pozostają niezależne.');o.modalonly=true;o.rmempty=true;
+		o=s.taboption('wifi',form.MultiValue,'_targets','Przypisanie bezpośrednie do OpenWrt','Tworzy osobną grupę dla tego szablonu. Zapis publikuje przypisanie dla końcówek, gdy automatyczna publikacja jest włączona. Zapisz i wyślij wywołuje pobranie od razu.');o.modalonly=true;o.rmempty=true;
 		const writableAP=id=>(uci.get('apcontroller',id,'platform')||(devicestatus.hosts||[]).find(h=>h.section===id)?.platform)==='openwrt';
 		uci.sections('apcontroller','host').filter(h=>writableAP(h['.name'])).forEach(h=>o.value(h['.name'],(h.name||h['.name'])+' ('+h.ipaddr+')'));
 		o.cfgvalue=function(id){return L.toArray(uci.get('apcontroller','map_'+id,'host'));};o.write=function(id,value){const group='map_'+id,targets=L.toArray(value).filter(Boolean);if(!targets.length){if(uci.get('apcontroller',group,'managed_wifi')===id)uci.remove('apcontroller',group);return;}if(!uci.get('apcontroller',group))uci.add('apcontroller','group',group);uci.set('apcontroller',group,'name','Wi-Fi: '+(uci.get('apcontroller',id,'name')||id));uci.set('apcontroller',group,'managed_wifi',id);uci.set('apcontroller',group,'host',targets);uci.set('apcontroller',group,'wifi',[id]);uci.set('apcontroller',group,'delete','0');uci.set('apcontroller',group,'useadditionalscript','0');};o.remove=function(id){this.write(id,[]);};
-		o=s.taboption('wifi',form.DummyValue,'_sendtargets','Wysyłanie do wybranych AP');o.renderWidget=function(id){const option=this;return E('div',{},[...['Zapisz i wyślij','Zapisz i sprawdź bez zmian'].map((label,index)=>E('button',{type:'button',class:'cbi-button '+(index?'cbi-button-action':'cbi-button-positive'),click:ui.createHandlerFn(option,async()=>{try{await saveWiFiForm(option,m);const targets=L.toArray(uci.get('apcontroller','map_'+id,'host'));await sendWiFiJob('map_'+id,targets,!!index);}catch(e){ui.addNotification(null,E('p',e.message),'error');}})},label))]);};o.modalonly=true;
+		o=s.taboption('wifi',form.DummyValue,'_sendtargets','Wysyłanie do wybranych AP');o.renderWidget=function(id){const option=this;return E('div',{},[...['Zapisz i wyślij','Zapisz i sprawdź (nie publikuj)'].map((label,index)=>E('button',{type:'button',class:'cbi-button '+(index?'cbi-button-action':'cbi-button-positive'),click:ui.createHandlerFn(option,async()=>{try{await saveWiFiForm(option,m);const targets=L.toArray(uci.get('apcontroller','map_'+id,'host'));await sendWiFiJob('map_'+id,targets,!!index);}catch(e){ui.addNotification(null,E('p',e.message),'error');}})},label))]);};o.modalonly=true;
 
 		/*
 		 * AP GROUP
@@ -2668,9 +2673,9 @@ return view.extend({
 		};
 
 		s.handleSendConfig=async function(id){
- try{await this.map.save();await uci.save();await apcCommit('apcontroller');const hosts=L.toArray(uci.get('apcontroller',id,'host')),checks=hosts.map(host=>{const input=E('input',{type:'checkbox',checked:true,value:host});return {input,node:E('label',{style:'display:block;margin:.3em 0'},[input,' '+(uci.get('apcontroller',host,'name')||host)+' ('+(uci.get('apcontroller',host,'ipaddr')||'?')+')'])};});
+ try{await this.map.save();await uci.save();await apcCommit('apcontroller',false);const hosts=L.toArray(uci.get('apcontroller',id,'host')).filter(host=>uci.get('apcontroller',host,'platform')==='openwrt'&&uci.get('apcontroller',host,'enabled')==='1'),checks=hosts.map(host=>{const input=E('input',{type:'checkbox',checked:true,value:host});return {input,node:E('label',{style:'display:block;margin:.3em 0'},[input,' '+(uci.get('apcontroller',host,'name')||host)+' ('+(uci.get('apcontroller',host,'ipaddr')||'?')+')'])};});
  const run=check=>ui.createHandlerFn(this,async()=>{try{await sendWiFiJob(id,checks.filter(v=>v.input.checked).map(v=>v.input.value),check);}catch(e){ui.addNotification(null,E('p',e.message),'error');}});
- ui.showModal('Wybierz urządzenia docelowe',[E('p',{},uci.get('apcontroller',id,'delete')==='1'?'Uwaga: ta grupa usuwa istniejące sekcje Wi-Fi na wybranych AP przed wysłaniem.':'Wyśle tylko do zaznaczonych AP. Pozostałe urządzenia nie otrzymają konfiguracji.'),...checks.map(v=>v.node),E('button',{type:'button',class:'cbi-button cbi-button-action',click:run(true)},'Sprawdź bez zmian'),E('button',{type:'button',class:'cbi-button cbi-button-positive',click:run(false)},'Wyślij do wybranych'),E('button',{type:'button',class:'cbi-button',click:ui.hideModal},'Anuluj')]);
+ ui.showModal('Wybierz urządzenia docelowe',[E('p',{},uci.get('apcontroller',id,'delete')==='1'?'Uwaga: pełny stan usuwa tylko sieci wcześniej zarządzane przez APController. Lokalne Wi-Fi, mesh i stacje pozostają.':'Wyśle tylko do zaznaczonych AP. Pozostałe urządzenia nie otrzymają konfiguracji.'),...checks.map(v=>v.node),E('button',{type:'button',class:'cbi-button cbi-button-action',click:run(true)},'Sprawdź bez zmian'),E('button',{type:'button',class:'cbi-button cbi-button-positive',click:run(false)},'Wyślij do wybranych'),E('button',{type:'button',class:'cbi-button',click:ui.hideModal},'Anuluj')]);
  }catch(e){ui.addNotification(null,E('p',e.message),'error');}
  };
 
@@ -2747,15 +2752,14 @@ return view.extend({
 
 		o = s.taboption(
 			'group',
-			form.Flag,
-			'delete',
-			_('Delete all'),
-			_('Delete all Wi-Fi before setting up new ones')
+			form.DummyValue,
+			'_managed_delete',
+			'Usuwanie sieci',
+			'Pełny stan usuwa sieci wcześniej zarządzane przez APController, które przestały być przypisane. Pozostałe Wi-Fi, mesh i stacje pozostają.'
 		);
 
 		o.modalonly = true;
-		o.rmempty = false;
-		o.default = '0';
+		o.cfgvalue = function() { return 'Tylko sieci zarządzane'; };
 
 		o = s.taboption(
 			'group',
@@ -2925,6 +2929,8 @@ return view.extend({
 		).forEach(([key, value]) => {
 			o.value(key, value);
 		});
+		o=s.option(form.Flag,'pull_auto_publish','Publikuj konfigurację po zapisaniu');o.default='1';o.rmempty=false;o.description='Przypisane OpenWrt pobierają wersję po starcie i co 2 minuty. Usunięta sieć znika tylko z zarządzanych sekcji AP. Sprawdź bez publikowania pozostawia dotychczasową wersję.';
+		o=s.option(form.Value,'pull_main','Adres głównego routera dla pobierania');o.datatype='ip4addr';o.rmempty=true;o.description='Domyślnie adres LAN głównego routera; AP musi mieć do niego dostęp SSH. Nie rozszerza reguł VPN ani firewalla.';
 		o=s.option(form.Value,'backup_mount','Nośnik backupu USB/NVMe','Istniejący punkt montowania pod /mnt. Brak nośnika zatrzymuje backup zamiast zapisu we flash.');o.default='/mnt/usbstorage';o.rmempty=false;o.validate=(id,value)=>/^\/mnt\/[a-zA-Z0-9_.-]+$/.test(value)||'Podaj punkt montowania /mnt/nazwa';
 		o=s.option(form.DynamicList,'native_subnet',_('Natywne podsieci'),_('Adresy z pozostałych podsieci są oznaczone kolorami.'));o.datatype='cidr4';o.default=['10.48.18.0/24'];
 

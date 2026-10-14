@@ -17,6 +17,9 @@ sed -i '\|^/usr/share/apcontroller/$|d;\|^/www/luci-static/resources/view/apcont
 for path in /usr/share/apcontroller/apcontroller.user /etc/config/network /etc/config/firewall /etc/config/multivpn /etc/apk/repositories.d/customfeeds.list /etc/init.d/swanctl /etc/config/apcontroller /etc/apcontroller/ /etc/apk/keys/apcontroller-local.pem /etc/swanctl/ /etc/strongswan.d/charon/af-alg.conf; do
     grep -qxF "$path" /etc/sysupgrade.conf || echo "$path" >> /etc/sysupgrade.conf
 done
+awk '!/^[[:space:]]*[^#].*\/usr\/bin\/apcontroller-pull-enroll/' /etc/crontabs/root > /etc/crontabs/root.pull.tmp
+printf '*/2 * * * * /usr/bin/apcontroller-pull-enroll all >/dev/null 2>&1\n' >> /etc/crontabs/root.pull.tmp
+chmod 600 /etc/crontabs/root.pull.tmp;mv /etc/crontabs/root.pull.tmp /etc/crontabs/root
 rm -f /tmp/luci-indexcache /tmp/luci-modulecache/*apcontroller*
 /etc/init.d/rpcd restart
 /etc/init.d/cron reload

@@ -1,6 +1,6 @@
 # APController i MultiVPN Connect — repozytorium APK
 
-OpenWrt 25.12, aarch64_cortex-a53. Źródła bazują na działającym kontrolerze i projekcie [rysiulg/apcontroller](https://github.com/rysiulg/apcontroller). Pakiety są podpisane lokalnym kluczem; publiczne repozytorium nie zawiera rzeczywistych konfiguracji, haseł ani prywatnych kluczy.
+OpenWrt 25.12, aarch64_cortex-a53. Autorem pierwotnego APController jest **Cezary Jackiewicz ([obsy](https://github.com/obsy))**, projekt [obsy/apcontroller](https://github.com/obsy/apcontroller). Ta wersja rozwija fork [rysiulg/apcontroller](https://github.com/rysiulg/apcontroller), dodając obsługę danych producentów, pakiety APK, MultiVPN i synchronizację stanu. Zachowano źródłową licencję GPL-3.0 (pełny tekst w LICENSE); metadane naszych nowych paczek wskazują GPL-3.0-only. SSTP zachowuje własną licencję upstream. Pakiety są podpisane lokalnym kluczem; publiczne repozytorium nie zawiera rzeczywistych konfiguracji, haseł ani prywatnych kluczy.
 
 ## Instalacja i aktualizacja
 
@@ -19,7 +19,7 @@ Aktualizacja samych aplikacji: `apk add --upgrade luci-apcontroller luci-app-mul
 
 Nazwy klientów są aliasami MAC, mającymi pierwszeństwo przed DHCP i nazwami AP. Grupę AP tworzą hosty i szablony Wi-Fi do wysłania. Odczyt UniFi/airOS i Omada jest obsługiwany; zapis konfiguracji jest dostępny dla OpenWrt. Omada SSH udostępnia CLI, więc skrypty powłoki OpenWrt nie są wysyłane do Omada.
 
-Wi-Fi pokazuje oddzielnie planowane przypisania i AP, na których odczytano SSID. Wyślij konfigurację jest osobną akcją. Opcjonalne pole VLAN przygotowuje sieć na OpenWrt w rozpoznanym układzie switch_guest/dev_guest; przy innym układzie wymagany jest dodatkowy skrypt. Nowy VLAN używa jednej przewodowej ścieżki CPU/LAN oraz STP, żeby nie dublować ścieżek przez BATMAN lub drugi port CPU. Agent zachowuje kopię network/wireless i dopisuje zmieniane konfiguracje do sysupgrade.conf. Nie zastępuje sieci zarządzającej.
+Wi-Fi pokazuje oddzielnie planowane przypisania i AP, na których odczytano SSID. Domyślnie zapis publikuje pełny stan dla przypisanych OpenWrt; końcówki pobierają go po starcie i co 2 minuty. Zapisz i wyślij dodatkowo wywołuje pobranie od razu. Zapisz i sprawdź nie publikuje projektu konfiguracji. Dodanie, zmiana SSID i usunięcie są uzgadniane według trwałych identyfikatorów, bez kasowania niezależnych sieci AP, mesh i stacji. Opcjonalne pole VLAN przygotowuje sieć na OpenWrt w rozpoznanym układzie switch_guest/dev_guest; przy innym układzie wymagany jest dodatkowy skrypt. Nowy VLAN używa jednej przewodowej ścieżki CPU/LAN oraz STP, żeby nie dublować ścieżek przez BATMAN lub drugi port CPU. Agent zachowuje kopię network/wireless i dopisuje zmieniane konfiguracje do sysupgrade.conf. Nie zastępuje sieci zarządzającej.
 
 Skrypty do urządzeń znajdują się w /usr/share/apcontroller/scripts; akcja Wykonaj skrypt dotyczy powłoki zgodnego AP. Dodatkowy skrypt jest wykonywany przez grupę tylko po włączeniu odpowiedniej opcji. Publiczny klucz SSH można dopisać oddzielnym przyciskiem na OpenWrt/root; prywatnego klucza nie wysyła się na AP.
 
@@ -44,3 +44,7 @@ APC_BUILD_DIR=/mnt/usbstorage/apcontroller-build sh packaging/build-router.sh /s
 ```
 
 Budowanie używa pełnych apk mkpkg/mkndx. Klucz prywatny w .signing pozostaje poza katalogiem WWW. Pakiety kopiuj przed atomową podmianą packages.adb; nie nadpisuj opublikowanej wersji inną zawartością. Źródła i historia są w source.tar.gz i apcontroller.bundle. Opis upstream/lokalnego SSTP jest w multivpn/sstp-source.
+
+## Pobieranie przez AP
+
+[Opis zapisu, push, pobierania i usuwania sieci](docs/Pull-i-stan-docelowy.md). Klucze klientów są ograniczone do odczytu ich własnych paczek. Stare harmonogramy synchronizacji i automatycznego firmware na AP zastępuje nowy klient. Prywatne paczki konfiguracji, hasła Wi-Fi i klucze pozostają poza publicznym repozytorium.

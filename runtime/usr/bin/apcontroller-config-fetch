@@ -1,0 +1,9 @@
+#!/bin/sh
+# Forced SSH command. One client key can read only its own configuration bundle.
+set -e
+host=${1:-}
+case "$host" in ''|*[!a-zA-Z0-9_]*) exit 2;;esac
+[ "$(uci -q get "apcontroller.$host.enabled")" = 1 ] && [ "$(uci -q get "apcontroller.$host.platform")" = openwrt ] || exit 1
+file=/etc/apcontroller/desired/$host/current.tar
+[ -f "$file" ] && [ ! -L "$file" ] || exit 1
+exec cat "$file"

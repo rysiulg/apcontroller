@@ -117,6 +117,7 @@ wifi_add() {
 	local ISOLATE="$8"
 	local MACFILTER="$9"
 	local MACLIST="${10}"
+	local WIFI_ID="${11}" BAND="${12}"
 
 	local CNT SEC
 
@@ -145,6 +146,7 @@ wifi_add() {
 	fi
 
 	wifi_set_macfilter "$SEC" "$MACFILTER" "$MACLIST"
+	if [ -n "$WIFI_ID" ]; then uci set wireless."$SEC".apcontroller="$WIFI_ID";uci set wireless."$SEC".apcontroller_band="$BAND";fi
 }
 
 
@@ -160,6 +162,7 @@ wifi_update() {
 	local MACFILTER="$9"
 	local MACLIST="${10}"
 	local NETWORK="${11}"
+	local WIFI_ID="${12}" BAND="${13}"
 	uci set wireless."$SEC".network="$NETWORK"
 
 	if [ "$ENABLED" -eq 0 ]; then
@@ -175,18 +178,22 @@ wifi_update() {
 	uci set wireless."$SEC".isolate="${ISOLATE:-0}"
 
 	wifi_set_macfilter "$SEC" "$MACFILTER" "$MACLIST"
+	if [ -n "$WIFI_ID" ]; then uci set wireless."$SEC".apcontroller="$WIFI_ID";uci set wireless."$SEC".apcontroller_band="$BAND";fi
 }
 
 
 json_load_file "$FILE" || exit 2
+json_get_var managed_only managed_only
+WANTED=""
 
 json_is_a wifis array || exit 2
 
 preflight_wifi(){
- local index=1 old="${APC_PREFLIGHT:-0}" enabled band network ssid encryption key vlan_id radios
+ local index=1 old="${APC_PREFLIGHT:-0}" enabled band network ssid encryption key vlan_id radios id
  APC_PREFLIGHT=1;json_select wifis
  while json_is_a "$index" object; do
-  json_select "$index";json_get_vars enabled band network ssid encryption key vlan_id
+  json_select "$index";json_get_vars enabled band network ssid encryption key vlan_id id
+  if [ "$managed_only" = 1 ]; then case "$id" in ''|*[!a-zA-Z0-9_]*) echo 'Brak poprawnej tożsamości zarządzanej sieci' >&2;return 2;;esac;fi
   case "$network" in ''|*[!a-zA-Z0-9_]*) echo 'Nieprawidłowa nazwa sieci AP' >&2;return 2;; esac
   [ -n "$ssid" ] && [ "$(printf '%s' "$ssid" | wc -c)" -le 32 ] || { echo 'SSID musi mieć 1–32 bajty' >&2;return 2; }
   case "$enabled" in 0|1) ;; *) echo 'Nieprawidłowy stan Wi-Fi' >&2;return 2;; esac
@@ -204,6 +211,23 @@ preflight_wifi(){
 }
 preflight_wifi || exit 2
 if [ "${APC_PREFLIGHT:-0}" = 1 ]; then echo 'APC: sprawdzenie zakończone; bez zmian';exit 0;fi
+if [ "$managed_only" = 1 ] && [ ! -f /etc/apcontroller/pull/migrated ] && json_is_a adopt array; then
+ json_select adopt;adoptidx=1
+ while json_is_a "$adoptidx" object; do
+  json_select "$adoptidx";json_get_vars id ssid band
+  case "$id" in ''|*[!a-zA-Z0-9_]*) exit 2;;esac
+  for section in $(uci -q show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+   [ "$(uci -q get "wireless.$section.mode")" = ap ] && [ "$(uci -q get "wireless.$section.ssid")" = "$ssid" ] || continue
+   [ -z "$(uci -q get "wireless.$section.apcontroller")" ] || continue
+   radio=$(uci -q get "wireless.$section.device");radioband=$(uci -q get "wireless.$radio.band")
+   [ -n "$radioband" ] || { hwmode=$(uci -q get "wireless.$radio.hwmode");case "$hwmode" in 11g) radioband=2g;;11a) radioband=5g;;esac; }
+   [ "$radioband" = "$band" ] || continue
+   uci set "wireless.$section.apcontroller=$id";uci set "wireless.$section.apcontroller_band=$band";NEEDCOMMIT=1
+  done
+  json_select ..;adoptidx=$((adoptidx+1))
+ done
+ json_select ..
+fi
 
 
 
@@ -246,7 +270,10 @@ while json_is_a "$IDX" object; do
 		hidden \
 		isolate \
 		vlan_id \
-		macfilter
+		macfilter \
+		id \
+		use_as
+	if [ -n "$id" ]; then case "$id" in *[!a-zA-Z0-9_]*) exit 2;;esac;WANTED="$WANTED $id:$band";fi
 	wifi_ensure_vlan "$network" "$vlan_id" || exit 2
 
 	[ -n "$macfilter" ] || macfilter="disable"
@@ -279,7 +306,7 @@ while json_is_a "$IDX" object; do
 	#
 	# Additional script
 	#
-	if [ -e "$WORKDIR/apcontroller.user" ]; then
+	if [ -e "$WORKDIR/apcontroller.user" ] && [ "$use_as" != 0 ]; then
 		APC_USER_SCRIPT="$WORKDIR/apcontroller.user" sh "$WORKDIR/apcontroller-agent-as" \
 			"$enabled" \
 			"$ssid" \
@@ -338,7 +365,9 @@ while json_is_a "$IDX" object; do
 	SECTIONS=''
 	for candidate in $(uci -q show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
 		[ "$(uci -q get "wireless.$candidate.mode")" = ap ] || continue
-		[ "$(uci -q get "wireless.$candidate.ssid")" != "$ssid" ] || SECTIONS="$SECTIONS $candidate"
+		owner=$(uci -q get "wireless.$candidate.apcontroller")
+		if [ -n "$id" ] && [ "$owner" = "$id" ] && [ "$(uci -q get "wireless.$candidate.apcontroller_band")" = "$band" ]; then SECTIONS="$SECTIONS $candidate"
+		elif [ -z "$owner" ] && [ "$(uci -q get "wireless.$candidate.ssid")" = "$ssid" ]; then SECTIONS="$SECTIONS $candidate";fi
 	done
 
 
@@ -355,7 +384,9 @@ while json_is_a "$IDX" object; do
 				"$hidden" \
 				"$isolate" \
 				"$macfilter" \
-				"$MACLIST"
+				"$MACLIST" \
+				"$id" \
+				"$band"
 		done
 
 		NEEDCOMMIT=1
@@ -387,7 +418,9 @@ while json_is_a "$IDX" object; do
 							"$isolate" \
 							"$macfilter" \
 							"$MACLIST" \
-							"$network"
+							"$network" \
+							"$id" \
+							"$band"
 
 						NEEDCOMMIT=1
 						FOUND=1
@@ -409,7 +442,9 @@ while json_is_a "$IDX" object; do
 					"$hidden" \
 					"$isolate" \
 					"$macfilter" \
-					"$MACLIST"
+					"$MACLIST" \
+					"$id" \
+					"$band"
 
 				NEEDCOMMIT=1
 			fi
@@ -424,14 +459,25 @@ while json_is_a "$IDX" object; do
 done
 
 
+if [ "$managed_only" = 1 ]; then
+ SEEN=''
+ for section in $(uci -q show wireless | sed -n 's/^wireless\.\([^=]*\)=wifi-iface$/\1/p'); do
+  [ "$(uci -q get "wireless.$section.mode")" = ap ] || continue
+  owner=$(uci -q get "wireless.$section.apcontroller");[ -n "$owner" ] || continue
+  identity=$owner:$(uci -q get "wireless.$section.apcontroller_band")
+  duplicate=$identity:$(uci -q get "wireless.$section.device")
+  case " $WANTED " in *" $identity "*) case " $SEEN " in *" $duplicate "*) uci delete "wireless.$section";NEEDCOMMIT=1;echo "APC: usunięto duplikat zarządzanej sekcji $section";;*) SEEN="$SEEN $duplicate";;esac;;*) uci delete "wireless.$section";NEEDCOMMIT=1;echo "APC: usunięto zarządzaną sekcję $section ($identity)";;esac
+ done
+fi
+
 #
 # Apply configuration
 #
 if [ "$NEEDCOMMIT" -eq 1 ] && { [ -n "$(uci -q changes wireless)" ] || [ -n "$(uci -q changes network)" ]; }; then
-	uci commit network
-	uci commit wireless
-	/etc/init.d/network reload >/dev/null
-	wifi reload
+	uci commit network || exit 1
+	uci commit wireless || exit 1
+	/etc/init.d/network reload >/dev/null || exit 1
+	wifi reload || exit 1
 fi
 
 

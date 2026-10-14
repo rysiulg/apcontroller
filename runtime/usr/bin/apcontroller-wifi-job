@@ -17,5 +17,4 @@ exec 9>/tmp/apcontroller-wifi-job.lock
 finish_wifi_job(){ code=$?;printf '%s\n' "$code" > "$dir/result";rm -f "$dir/pid"; }
 trap finish_wifi_job EXIT
 flock -n 9 || { echo "Trwa inne zadanie Wi-Fi" >&2;exit 1; }
-mode=verbose;[ "${4:-}" != check ] || mode=check
-/usr/bin/apcontroller-sendconfig "$group" "$mode" "$targets"
+/usr/bin/apcontroller-dispatch-wifi "${4:-start}" "$group" "$targets"

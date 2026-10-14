@@ -4,8 +4,8 @@ Sekcja „Skrypty z NAS” ma podgląd lokalnych plików, sprawdzenie NAS oraz a
 
 Synchronizator sync_scripts_from_nas.sh w projekcie legacy-scripts jest niezależny od instalacji APController. Poprawiono wyznaczanie katalogu env.sh, usunięto wypisywanie tokenu, nadpisywanie /etc/config/network, reboot i samodzielną zmianę crona. Nie instaluje pliku z niezgodną sumą. Endpoint index.php odczytuje pliki, nie modyfikuje ich przy GET, wymaga tokenu i udostępnia tylko skrypty .sh, z wyłączeniem env.sh. Istniejący harmonogram nie został zmieniony.
 
-## Co jeszcze wymaga migracji
-sync-wireless-smart.sh ma wczesne exit przed zasadniczą konfiguracją radia/mesh, błędne odwołanie do grep i zależność od katalogu roboczego. Usunięcie exit uruchomiłoby wiele zmian sieci, SSH i radia. Dlatego nie aktywowano tego kodu. Wybrane ustawienia Wi-Fi/VLAN powinny być wysyłane przez istniejące „Zapisz i wyślij konfigurację Wi-Fi”, z przypisaniem do konkretnych AP; kolejny etap to wydzielenie mesh/BATMAN w osobny adapter z podglądem zmian.
+## Migracja synchronizacji Wi-Fi
+sync-wireless-smart.sh jest wrapperem APController: na głównym wywołuje sprawdzenie lub publikację i push do wskazanych AP; na końcówce wywołuje pobranie własnej paczki. Dawny skrypt z wczesnym exit i zmianami całej sieci zachowano prywatnie, a jego aktywne zadania cron na przygotowanych AP wyłączono. Mesh/BATMAN wymaga oddzielnego adaptera i sprawdzenia topologii; nie aktywowano dawnych zmian radia/mostów przez usunięcie exit. [Opis synchronizacji i usuwania](Pull-i-stan-docelowy.md).
 
 Autoupdate.sh ma exit przed sysupgrade; nie zastępuje aktualizacji firmware przez Attended Sysupgrade. 99-dhcp-fallback.sh nie jest skanerem link-local i nie należy włączać go na routerze ze statycznym LAN tylko w celu wykrywania 169.254. Make_backup_usb.sh pozostaje wyłączony przez istniejącą blokadę autobackup. Konfiguracja env.sh jest lokalna i nie trafia do publicznych źródeł/pakietów.
 
