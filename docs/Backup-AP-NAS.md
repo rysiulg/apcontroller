@@ -1,0 +1,15 @@
+# Backup AP → główny router → NAS
+
+Ręczny przycisk APController zbiera kopie z włączonych OpenWrt i głównego routera. Główny wywołuje sysupgrade -b na AP przez istniejący dostęp SSH, a AP przesyła archiwum do głównego przez ten sam kanał. Nie dodajemy na AP nowych kluczy ani niezależnych harmonogramów. To transfer sterowany przez kontroler, a nie samoczynny push AP.
+
+Główny zapisuje zbiorczy TAR na podłączonym dysku; każdy router ma w nim osobne tar.gz. Paczka jest szyfrowana CMS/AES-256 i dopiero zaszyfrowany plik p7m trafia na NAS. Po przesłaniu porównujemy SHA256. Błąd dowolnego AP jest wskazany w raporcie; kopie innych urządzeń nadal mogą zostać zachowane. Nie wykonywano testu odtwarzania konfiguracji na pracującym routerze.
+
+Nośnik domyślnie /mnt/usbstorage, opcja w Ustawieniach. NVMe może zachować ten punkt montowania albo dostać własny /mnt/nazwa. Nie zapisujemy dużej kopii we flash przy braku nośnika. Nie włączamy cron; marker /etc/autobackup.disabled zostaje. make_backup_usb.sh --manual uruchamia zbieranie na głównym, a --stream udostępnia kopię przez stdout.
+
+Nasze paczki instaluje APK, więc nie kopiujemy ich payloadu jako własnych plików. Własne /scripts i konfiguracje /etc/apcontroller pozostają w backupie. Klucz odszyfrowania /etc/apcontroller/backups/encryption.key jest prywatny i potrzebuje osobnej prywatnej kopii poza routerem; jego kopia w zaszyfrowanym archiwum nie zastępuje tego zabezpieczenia. Nie trafia do repozytorium ani materiałów AI. Prywatną kopię klucza zapisano lokalnie w vpn-private; dokumentacja przeglądowa nie zawiera tego katalogu.
+
+Endpoint NAS: /openwrt/backups/upload-aggregate-v1.php, wymaga istniejącego tokenu oraz PUT CMS. Web Station ogranicza PHP do /volume2/web/openwrt (open_basedir), więc zapis poza WWW w 4all nie jest dostępny bez zmian DSM. Zastosowano szyfrowanie i zapis pod `\\nas\web\openwrt\backups\encrypted-main` jako `nazwa.p7m.php`: nagłówek PHP zwraca 404 i kończy wykonanie, a za nim jest zaszyfrowana paczka zakodowana base64. Bezpośredni GET nie udostępnia zawartości. To nie są surowe konfiguracje. Oryginał lokalny pozostaje prywatny na dysku routera. Endpoint nie wypisuje i nie loguje nagłówka Authorization. Nie zmienia istniejącego upload.php, jego historii ani innych backupów.
+
+Odszyfrowanie na zaufanym komputerze z OpenSSL: `openssl cms -decrypt -binary -inform DER -in paczka.p7m -recip encryption.crt -inkey encryption.key -out paczka.tar`. Następnie rozpakuj TAR i wybierz kopię konkretnego AP. Pierwszy test przed r19 zapisywał agregat jako tar.gz; w tym przypadku wyjście odszyfrowania nazwij paczka.tar.gz. Nie odtwarzaj kopii innego modelu/routera.
+
+Plik p7m.php pobierz przez SMB. Przed odszyfrowaniem użyj `python tools/unwrap-backup.py paczka.p7m.php paczka.p7m`; skrypt usuwa nagłówek blokujący HTTP i dekoduje base64. Nie wymaga i nie czyta prywatnego klucza. P7M odszyfrujesz poleceniem powyżej. Test odszyfrowania sprawdza integralność transportu przez porównanie SHA256 i możliwość użycia zachowanego klucza; nie zastępuje testu pełnego przywrócenia urządzenia.

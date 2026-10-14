@@ -51,6 +51,12 @@ function scriptsToolbar(){
  refresh().then(d=>summary.textContent=d.done?(d.code?'Poprzednia operacja: błąd':'Poprzednia operacja: OK'):'Pliki lokalne').catch(e=>summary.textContent=e.message);
  return E('details',{class:'apc-scripts'},[E('summary',{},'Skrypty z NAS'),E('p',{},'Sprawdzenie sum SHA256 i składni. Aktualizacja zapisuje pliki i ich poprzednie wersje; uruchamianie skryptów pozostaje oddzielne.'),E('button',{type:'button',class:'cbi-button cbi-button-action',click:()=>run('check')},'Sprawdź NAS'),E('button',{type:'button',class:'cbi-button cbi-button-positive',click:()=>run('update')},'Aktualizuj pliki'),summary,details,table]);
 }
+function backupToolbar(){
+ const status=E('span',{},'Ręczne zbieranie kopii'),log=E('pre',{style:'white-space:pre-wrap'}),details=E('details',{},[E('summary',{},'Szczegóły backupu'),log]);let busy=false;
+ const refresh=async()=>{const r=await fs.exec('/usr/bin/apcontroller-backup',['report']);if(r.code)throw new Error(r.stderr||r.stdout);const data=JSON.parse(r.stdout);log.textContent=data.output;if(data.done)status.textContent=data.code?'Backup zakończony błędem — sprawdź szczegóły':'Backup zapisany na NAS';return data;};
+ const button=E('button',{type:'button',class:'cbi-button cbi-button-positive',click:async()=>{if(busy)return;busy=true;button.disabled=true;try{const r=await fs.exec('/usr/bin/apcontroller-backup',['start']);if(r.code)throw new Error(r.stderr||r.stdout);status.textContent='Zbieranie z głównego routera i włączonych OpenWrt…';for(let i=0;i<300;i++){await new Promise(resolve=>setTimeout(resolve,3000));if((await refresh()).done)break;}}catch(e){status.textContent=e.message;}finally{busy=false;button.disabled=false;}}},'Zbierz backup i wyślij na NAS');refresh().catch(e=>status.textContent=e.message);
+ return E('details',{class:'apc-backups'},[E('summary',{},'Backup głównego routera i AP'),E('p',{},'AP przesyłają kopie przez SSH do głównego routera. Główny dodaje własną kopię, szyfruje paczkę i wysyła ją do NAS. Harmonogram pozostaje wyłączony.'),button,E('button',{type:'button',class:'cbi-button',click:()=>refresh().catch(e=>status.textContent=e.message)},'Odśwież status'),status,details]);
+}
 function scanToolbar(){
  const select=E('select',{'aria-label':'Podsieć skanowania'}),summary=E('span',{},'Ładowanie…'),table=E('div'),details=E('details',{},[E('summary',{},'Wyniki skanowania / fallback 169.254'),table]);let busy=false;
  const order=E('select',{'aria-label':'Sortowanie wyników'},['IP','Nazwa','Ocena'].map(v=>E('option',{value:v},v)));let last=null;order.addEventListener('change',()=>{if(last)display(last);});
@@ -2908,6 +2914,7 @@ return view.extend({
 		).forEach(([key, value]) => {
 			o.value(key, value);
 		});
+		o=s.option(form.Value,'backup_mount','Nośnik backupu USB/NVMe','Istniejący punkt montowania pod /mnt. Brak nośnika zatrzymuje backup zamiast zapisu we flash.');o.default='/mnt/usbstorage';o.rmempty=false;o.validate=(id,value)=>/^\/mnt\/[a-zA-Z0-9_.-]+$/.test(value)||'Podaj punkt montowania /mnt/nazwa';
 		o=s.option(form.DynamicList,'native_subnet',_('Natywne podsieci'),_('Adresy z pozostałych podsieci są oznaczone kolorami.'));o.datatype='cidr4';o.default=['10.48.18.0/24'];
 
 		/*
@@ -3027,7 +3034,7 @@ return view.extend({
 			root.classList.add('apcontroller-page');
 			const pageStyle=E('style', {}, '.apcontroller-page{min-width:0;max-width:100%;margin-left:0}.apcontroller-page .cbi-tblsection{min-width:0;max-width:100%;overflow-x:auto}.apcontroller-page table{margin-left:0!important;width:100%;font-size:.9em}.apcontroller-page table th,.apcontroller-page table td{padding:7px 6px!important;vertical-align:middle;overflow-wrap:anywhere}.apcontroller-page td[data-name="name"]{max-width:190px}.apcontroller-page td[data-name="_status"],.apcontroller-page td[data-name="ipaddr"]{white-space:nowrap}.apcontroller-page .cbi-section-actions{white-space:nowrap}.apcontroller-page .apc-package-status{white-space:pre-wrap;overflow-wrap:anywhere;max-height:250px;overflow:auto}.apc-package-actions{display:flex;gap:8px;flex-wrap:wrap}.apc-client-summary{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.apc-client-summary>div{border:1px solid var(--border-color-medium);border-radius:6px;padding:8px 16px;display:flex;gap:12px;align-items:center}.apc-client-summary strong{font-size:1.35em}.apc-subnet{border-left:4px solid;padding:2px 7px;border-radius:3px;display:inline-block}.apc-subnet-legend{display:flex;gap:14px;flex-wrap:wrap}#cbi-apcontroller-vpn table{min-width:880px}#cbi-apcontroller-vpn table td,#cbi-apcontroller-vpn table th{overflow-wrap:normal;word-break:normal}#cbi-apcontroller-vpn td[data-name=remote_subnet]{white-space:nowrap}#cbi-apcontroller-vpn .apc-package-actions{gap:4px;min-width:160px}');
 			root.querySelectorAll('#cbi-apcontroller-host table').forEach(table => { if (table.parentElement.id !== 'cbi-apcontroller-host') return; const wrap=E('div', {'class':'apc-table-scroll',style:'max-width:100%;overflow-x:auto'}); table.before(wrap); wrap.appendChild(table); });
-			return E('div',{class:'apcontroller-page'},[pageStyle,scanToolbar(),scriptsToolbar(),root]);
+			return E('div',{class:'apcontroller-page'},[pageStyle,scanToolbar(),scriptsToolbar(),backupToolbar(),root]);
 		});
 	},
 

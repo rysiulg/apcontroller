@@ -72,6 +72,9 @@
         ],
         "/usr/bin/apcontroller-wifi-job": [
           "exec"
+        ],
+        "/usr/bin/apcontroller-backup": [
+          "exec"
         ]
       },
       "ubus": {

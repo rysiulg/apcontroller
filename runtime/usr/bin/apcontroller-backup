@@ -1,0 +1,58 @@
+#!/bin/sh
+set -e
+umask 077
+action=${1:-report};targets=${2:-};state=/etc/apcontroller/backups;disk=$(uci -q get apcontroller.@global[0].backup_mount || echo /mnt/usbstorage);storage=$disk/apcontroller-backups
+mkdir -p "$state"
+case "$action" in
+ report) exec ucode -e 'import {readfile} from "fs";let d="/etc/apcontroller/backups",s=readfile(d+"/result");printf("%J\n",{done:!!s,code:s?int(trim(s)):null,output:readfile(d+"/report")||"Brak operacji"});';;
+ start)
+  case "$targets" in *[!a-zA-Z0-9_,]*) exit 2;;esac
+  if [ -s "$state/pid" ] && kill -0 "$(cat "$state/pid")" 2>/dev/null && grep -q 'apcontroller-backup' "/proc/$(cat "$state/pid")/cmdline"; then echo 'Backup już trwa' >&2;exit 1;fi
+  rm -f "$state/result";start-stop-daemon -S -b -m -p "$state/pid" -x "$0" -- run "$targets";echo 'Zbieranie backupów rozpoczęte';exit;;
+ run) ;;*) exit 2;;
+esac
+work=''
+finish_backup(){ code=$?;[ "$code" = 0 ] || printf 'Operacja przerwana: kod %s. Sprawdź backup lokalny i dostęp do NAS.\n' "$code" >> "$state/report";printf '%s\n' "$code" > "$state/result";rm -f "$state/pid";[ -z "$work" ] || rm -rf "$work"; }
+trap finish_backup EXIT
+case "$targets" in *[!a-zA-Z0-9_,]*) exit 2;;esac
+case "$disk" in /mnt/*) ;;*) echo 'Nośnik backupu musi być zamontowany pod /mnt' >&2;exit 2;;esac
+case "$disk" in *[!a-zA-Z0-9_./-]*) exit 2;;esac
+awk -v disk="$disk" '$2==disk {found=1} END {exit !found}' /proc/mounts || { echo 'Brak zamontowanego USB/NVMe; nie zapisano backupu we flash' >&2;exit 2; }
+[ -f /scripts/env.sh ] || exit 2
+. /scripts/env.sh
+. /usr/share/apcontroller/lib/ssh.sh
+[ -n "${TOKEN:-}" ] || exit 2
+case "${SERWER_WWW_HTTPS:-}" in https://*) server=$SERWER_WWW_HTTPS;;*) echo 'Brak adresu HTTPS NAS' >&2;exit 2;;esac
+exec 9>/tmp/apcontroller-backup.lock
+flock -n 9 || { echo 'Trwa zbieranie backupów' >&2;exit 1; }
+mkdir -p "$storage";chmod 700 "$storage"
+work=$(mktemp -d "$storage/work.XXXXXX")
+stamp=$(date +%Y%m%d-%H%M%S);bundle=MARM-$stamp-$$;report=$state/report
+printf 'Backup %s\nMAIN: tworzenie kopii konfiguracji i zachowywanych danych…\n' "$bundle" > "$report"
+for item in /scripts/ /etc/apcontroller/; do grep -qxF "$item" /etc/sysupgrade.conf || echo "$item" >> /etc/sysupgrade.conf;done
+if [ ! -f "$state/encryption.key" ]; then openssl req -x509 -newkey rsa:3072 -nodes -days 3650 -subj /CN=OpenWrt-backup-encryption -keyout "$state/encryption.key" -out "$state/encryption.crt" >/dev/null 2>&1;fi
+chmod 600 "$state/encryption.key"
+/sbin/sysupgrade -b "$work/MAIN.tar.gz" >"$work/MAIN.log" 2>&1
+tar -tzf "$work/MAIN.tar.gz" >/dev/null
+printf 'MAIN: OK\n' >> "$report"
+failed=0
+if [ -z "$targets" ]; then
+ . /lib/functions.sh;config_load apcontroller;list_backup_host(){ local enabled platform;config_get enabled "$1" enabled;config_get platform "$1" platform;[ "$enabled:$platform" != 1:openwrt ] || printf '%s\n' "$1"; };targets=$(config_foreach list_backup_host host | tr '\n' ',')
+fi
+for host in $(printf '%s' "$targets" | tr ',' ' '); do
+ [ "$(uci -q get "apcontroller.$host")" = host ] || { echo "Nieznany AP $host" >&2;exit 2; }
+ ip=$(uci -q get "apcontroller.$host.ipaddr");user=$(uci -q get "apcontroller.$host.username");pass=$(uci -q get "apcontroller.$host.password" || true);port=$(uci -q get "apcontroller.$host.port" || echo 22);key=$(uci -q get "apcontroller.$host.keyfile" || true);use=$(uci -q get "apcontroller.$host.usekeyfile" || echo 0)
+ if apc_ssh_exec "$ip" "$port" "$user" "$pass" "$key" "$use" 'set -e; test -f /etc/openwrt_release; umask 077; work=$(mktemp -d /tmp/apc-backup.XXXXXX); trap '\''rm -rf "$work"'\'' EXIT; /sbin/sysupgrade -b "$work/config.tar.gz" >&2; tar -tzf "$work/config.tar.gz" >/dev/null; cat "$work/config.tar.gz"' > "$work/$host.tar.gz" 2> "$work/$host.log" && tar -tzf "$work/$host.tar.gz" >/dev/null 2>&1; then printf '%s (%s): OK — przesłano do MAIN\n' "$host" "$ip" >> "$report";else printf '%s (%s): BŁĄD — brak poprawnego backupu\n' "$host" "$ip" >> "$report";failed=1;fi
+done
+printf 'Pakowanie i szyfrowanie; następnie wysyłanie do NAS…\n' >> "$report"
+cp "$report" "$work/REPORT.txt"
+tar -cf "$storage/$bundle.tar" -C "$work" .
+openssl cms -encrypt -binary -aes256 -in "$storage/$bundle.tar" -outform DER -out "$storage/$bundle.p7m" "$state/encryption.crt"
+openssl cms -decrypt -binary -inform DER -in "$storage/$bundle.p7m" -recip "$state/encryption.crt" -inkey "$state/encryption.key" -out /dev/null
+curl -fsS --connect-timeout 10 --max-time 600 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/pkcs7-mime' -H "X-Backup-Name: $bundle.p7m" --upload-file "$storage/$bundle.p7m" "$server/openwrt/backups/upload-aggregate-v1.php" -o "$work/nas.json"
+remotehash=$(ucode -e 'import {readfile} from "fs";printf("%s",json(readfile(ARGV[0])).sha256||"");' "$work/nas.json")
+nasfile=$(ucode -e 'import {readfile} from "fs";printf("%s",json(readfile(ARGV[0])).saved||"");' "$work/nas.json")
+localhash=$(sha256sum "$storage/$bundle.p7m" | cut -d ' ' -f 1)
+[ "$remotehash" = "$localhash" ] || { echo 'NAS: niezgodna suma backupu' >> "$report";exit 1; }
+printf 'NAS: OK — %s, SHA256 %s\nArchiwum lokalne: %s/%s.tar\n' "$nasfile" "$localhash" "$storage" "$bundle" >> "$report"
+cat "$report";exit "$failed"
