@@ -1,0 +1,11 @@
+#!/bin/sh
+# Refuse to reintroduce the exposed historical key from an old clone.
+case "$2" in *github.com/rysiulg/apcontroller*|*github.com:rysiulg/apcontroller*) ;; *) exit 0 ;; esac
+while read -r local_ref local_sha remote_ref remote_sha; do
+    case "$local_sha" in 0000000000000000000000000000000000000000) continue ;; esac
+    if [ -n "$(git rev-list --max-count=1 "$local_sha" -- keys/apcontroller.rsa)" ]; then
+        echo 'Push blocked: this history contains the exposed keys/apcontroller.rsa. Use a clean clone of the rewritten GitHub history.' >&2
+        exit 1
+    fi
+done
+exit 0
