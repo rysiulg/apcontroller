@@ -1986,7 +1986,7 @@ return view.extend({
 
 		if (!selectedcolumns.includes('enabled'))
 			o.modalonly = true;
-		o=s.taboption('host',form.Flag,'pull_sync','Synchronizuj Wi-Fi z głównym');o.modalonly=true;o.rmempty=false;o.default='0';o.depends('platform','openwrt');o.description='Osobna zgoda na publikację i pobieranie konfiguracji tego AP. Odczyt klientów działa niezależnie. Wyłączenie pozostawia ostatnią konfigurację Wi-Fi.';
+		o=s.taboption('host',form.Flag,'pull_sync','Synchronizuj Wi-Fi z głównym (OpenWrt)');o.modalonly=true;o.rmempty=false;o.default='0';o.description='Osobna zgoda na publikację i pobieranie konfiguracji AP z OpenWrt. Odczyt klientów działa niezależnie. Wyłączenie pozostawia ostatnią konfigurację Wi-Fi. Fabryczne Omada/UniFi mają obecnie tylko odczyt.';
 
 		o = s.taboption(
 			'host',
@@ -2153,9 +2153,9 @@ return view.extend({
 			'0'
 		);
 
-		o=s.taboption('host',form.Flag,'pull_setup_credentials','Osobny login i hasło do przygotowania AP');o.modalonly=true;o.rmempty=false;o.default='0';o.depends({platform:'openwrt',pull_sync:'1'});o.description='Bez zaznaczenia używa dostępu SSH powyżej. Służy do instalacji i aktualizacji klienta synchronizacji; nie zmienia konta ani hasła na AP. Wymagane konto root. Samo pobieranie używa własnego klucza AP.';
-		o=s.taboption('host',form.Value,'pull_username','Login do przygotowania');o.modalonly=true;o.rmempty=false;o.default='root';o.depends({platform:'openwrt',pull_sync:'1',pull_setup_credentials:'1'});o.validate=function(id,value){return value==='root'?true:'Przygotowanie klienta OpenWrt wymaga konta root.';};
-		o=s.taboption('host',form.Value,'pull_password','Hasło do przygotowania');o.modalonly=true;o.password=true;o.rmempty=false;o.depends({platform:'openwrt',pull_sync:'1',pull_setup_credentials:'1'});o.validate=function(id,value){return value?true:'Wpisz hasło istniejącego konta root na AP.';};o.description='Przechowywane w prywatnej konfiguracji routera i jej backupie; nie trafia do repozytorium APK ani GitHub.';
+		o=s.taboption('host',form.Flag,'pull_setup_credentials','Osobny login i hasło do przygotowania AP');o.modalonly=true;o.rmempty=false;o.default='0';o.depends('pull_sync','1');o.description='Bez zaznaczenia używa dostępu SSH powyżej. Służy do instalacji i aktualizacji klienta synchronizacji; nie zmienia konta ani hasła na AP. Wymagane konto root. Samo pobieranie używa własnego klucza AP.';
+		o=s.taboption('host',form.Value,'pull_username','Login do przygotowania');o.modalonly=true;o.rmempty=false;o.default='root';o.depends({pull_sync:'1',pull_setup_credentials:'1'});o.validate=function(id,value){return value==='root'?true:'Przygotowanie klienta OpenWrt wymaga konta root.';};
+		o=s.taboption('host',form.Value,'pull_password','Hasło do przygotowania');o.modalonly=true;o.password=true;o.rmempty=false;o.depends({pull_sync:'1',pull_setup_credentials:'1'});o.validate=function(id,value){return value?true:'Wpisz hasło istniejącego konta root na AP.';};o.description='Przechowywane w prywatnej konfiguracji routera i jej backupie; nie trafia do repozytorium APK ani GitHub.';
 		o=s.taboption('host',form.Value,'authorizedkey','Klucz publiczny do dopisania na AP','Pojedynczy publiczny klucz SSH. Dopisywanie obsługiwane dla root na OpenWrt; nie wklejaj klucza prywatnego.');o.modalonly=true;o.rmempty=true;
 		o=s.taboption('host',form.DummyValue,'_authorizekey','Instalacja klucza');o.modalonly=true;o.renderWidget=function(id){return E('button',{type:'button','class':'cbi-button',click:ui.createHandlerFn(this,async()=>{try{await m.save();await uci.save();await apcCommit('apcontroller');const r=await fs.exec('/usr/bin/apcontroller-authorize-key',[id]);if(r.code)throw new Error(r.stderr||r.stdout);ui.addNotification(null,E('p',r.stdout));}catch(e){ui.addNotification(null,E('p',e.message),'error');}})},'Dopisz klucz publiczny na AP');};
 
