@@ -9,9 +9,9 @@ case "$action" in
  check|update)
   if [ -f "$dir/pid" ] && kill -0 "$(cat "$dir/pid")" 2>/dev/null && grep -q 'apcontroller-scripts' "/proc/$(cat "$dir/pid")/cmdline"; then echo 'Operacja skryptów już trwa'; exit 1; fi
   rm -f "$dir/result"
-  setsid "$0" _run "$action" > "$dir/log" 2>&1 < /dev/null & echo $! > "$dir/pid"
+  : > "$dir/log"; start-stop-daemon -S -b -m -p "$dir/pid" -x "$0" -- _run "$action"
   echo 'Operacja rozpoczęta'; exit 0;;
- _run) action=${2:-}; case "$action" in check|update) ;; *) exit 2;; esac;;
+ _run) exec > "$dir/log" 2>&1 < /dev/null; action=${2:-}; case "$action" in check|update) ;; *) exit 2;; esac;;
  *) exit 2;;
 esac
 exec 9>/tmp/apcontroller-scripts.lock

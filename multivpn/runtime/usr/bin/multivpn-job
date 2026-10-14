@@ -43,8 +43,7 @@ case "$action" in
     if [ -f "$dir/$id.pid" ] && kill -0 "$(cat "$dir/$id.pid")" 2>/dev/null && tr '\0' ' ' < "/proc/$(cat "$dir/$id.pid")/cmdline" | grep -qF "$0 _run $id "; then echo 'Trwa poprzednia operacja VPN' >&2; exit 1; fi
     rm -f "$state"
     printf 'Operacja %s została przyjęta dla profilu %s.\n' "$action" "$id" > "$log"
-    setsid "$0" _run "$id" "$action" >/dev/null 2>&1 < /dev/null 9>&- &
-    printf '%s\n' "$!" > "$dir/$id.pid"
+    start-stop-daemon -S -b -m -p "$dir/$id.pid" -x "$0" -- _run "$id" "$action"
     cat "$log"
     ;;
  *) exit 2;;

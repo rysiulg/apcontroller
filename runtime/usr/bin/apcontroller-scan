@@ -8,9 +8,9 @@ case "$action" in
  start) case "$scope" in ''|*[!0-9./]*) exit 2;; esac
   ucode /usr/share/apcontroller/lib/scanner.uc targets "$dir" "$scope" >/dev/null
   if [ -f "$dir/pid" ] && kill -0 "$(cat "$dir/pid")" 2>/dev/null && grep -q 'apcontroller-scan' "/proc/$(cat "$dir/pid")/cmdline"; then echo 'Skanowanie już trwa'; exit 0; fi
-  setsid "$0" _run "$scope" >"$dir/log" 2>&1 < /dev/null & echo $! >"$dir/pid"
+  : > "$dir/log"; start-stop-daemon -S -b -m -p "$dir/pid" -x "$0" -- _run "$scope"
   echo 'Skanowanie rozpoczęte'; exit 0;;
- _run) ;;
+ _run) exec > "$dir/log" 2>&1 < /dev/null;;
  *) exit 2;;
 esac
 exec 9>/tmp/apcontroller-scan.lock

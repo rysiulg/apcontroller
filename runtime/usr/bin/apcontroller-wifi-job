@@ -9,8 +9,8 @@ case "$action" in
  report) ucode -e 'import {readfile} from "fs";let d="/etc/apcontroller/wifi-jobs",s=readfile(d+"/result");printf("%J\n",{done:!!s,code:s?int(trim(s)):null,output:readfile(d+"/log")||"Brak operacji"});';exit;;
  start|check)
   if [ -s "$dir/pid" ] && kill -0 "$(cat "$dir/pid")" 2>/dev/null && grep -q 'apcontroller-wifi-job' "/proc/$(cat "$dir/pid")/cmdline"; then echo 'Wysyłanie Wi-Fi już trwa' >&2;exit 1;fi
-  rm -f "$dir/result";setsid "$0" _run "$group" "$targets" "$action" > "$dir/log" 2>&1 < /dev/null & echo $! > "$dir/pid";echo 'Operacja rozpoczęta';exit;;
- _run) ;;
+  rm -f "$dir/result";: > "$dir/log";start-stop-daemon -S -b -m -p "$dir/pid" -x "$0" -- _run "$group" "$targets" "$action";echo 'Operacja rozpoczęta';exit;;
+ _run) exec > "$dir/log" 2>&1 < /dev/null;;
  *) exit 2;;
 esac
 exec 9>/tmp/apcontroller-wifi-job.lock
