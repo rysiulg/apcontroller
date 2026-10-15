@@ -16,6 +16,25 @@ for(let line in split(readfile('/tmp/dhcp.leases')||'','\n')){let f=split(trim(l
 try{let dhcp=json(readfile('/etc/apcontroller/dhcp-zacisze.json'));for(let p in dhcp.leases||[]){let mac=lc(p.mac||p['mac-address']||'');if(p.status=='bound')leases[mac]=p.ip||p.address;if(p.name||p['host-name'])names[mac]=p.name||p['host-name'];}}catch(e){}
 function add(ip,mac,name,source){ip=ip||'';mac=lc(mac||'');if(!mac&&ip){rows['ip|'+ip]={ip:ip,mac:'—',name:name||'',source:source,dhcp:false,status:'Odpowiada na ICMP; MAC/DHCP nieznane'};return;}if(!match(mac,/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/)||mac=='00:00:00:00:00:00')return;if(ip&&ipnum(ip)==null)return;let key=mac+'|'+ip;if(!rows[key])rows[key]={ip:ip,mac:mac,name:name||names[mac]||'',source:source};else if(index(rows[key].source,source)<0)rows[key].source+=', '+source;rows[key].dhcp=leases[mac]==ip;rows[key].status=substr(ip,0,8)=='169.254.'?'Fallback 169.254 — sprawdź DHCP':!ip?'Wi-Fi bez odczytanego IP':rows[key].dhcp?'DHCP potwierdzone':'Bez potwierdzonej dzierżawy / możliwy statyczny IP';}
 try{let status=json(readfile(dir+'/status.json'));for(let h in status.hosts||[]){add(h.ipaddr,h.mac,h.name,'APController');for(let p in h.clients||[])add(p.ipaddr||p.ip,p.mac,p.name,h.name||h.ipaddr);}for(let p in status.clients||[])add(p.ipaddr||p.ip,p.mac,p.name,p.ap_name||'Wi-Fi');}catch(e){}
-for(let line in split(readfile(dir+'/neighbors.txt')||'','\n')){let f=split(trim(line),/\s+/);if(length(f)>4&&ipnum(f[1])!=null&&f[3]=='0x2')add(f[1],f[4],'',f[0]);let m=match(line,/^(\S+)\s+(\d+\.\d+\.\d+\.\d+).*lladdr\s+([0-9a-f:]+)/i);if(m)add(m[2],m[3],'',m[1]);let arp=match(line,/^(\S+).*([0-9a-f]{2}(:[0-9a-f]{2}){5})\s+>.*ARP,.*(tell|Reply)\s+(169\.254\.\d+\.\d+)/i);if(arp)add(arp[5],arp[2],'',arp[1]);let reply=match(line,/^(\S+).*ARP, Reply (169\.254\.\d+\.\d+) is-at ([0-9a-f:]+)/i);if(reply)add(reply[2],reply[3],'',reply[1]);let ipv4=match(line,/^(\S+).*([0-9a-f]{2}(:[0-9a-f]{2}){5})\s+>.*IPv4.* (169\.254\.\d+\.\d+)(\.\d+)? > /i);if(ipv4)add(ipv4[4],ipv4[2],'',ipv4[1]);}
+function observed(ip,mac,source,line,confirmed){
+ let vlan=match(line,/vlan (\d+)/);if(vlan)source+=' / VLAN '+vlan[1];
+ add(ip,mac,'',source);let row=rows[lc(mac)+'|'+ip];if(!row)return;
+ row.apipa_confirmed=row.apipa_confirmed||confirmed;
+ row.status=row.apipa_confirmed?'Adres link-local 169.254 — zweryfikuj DHCP':'Sonda 169.254 — kandydat adresu, jeszcze nie potwierdzony';
+}
+for(let line in split(readfile(dir+'/neighbors.txt')||'','\n')){
+ let f=split(trim(line),/\s+/);if(length(f)>4&&ipnum(f[1])!=null&&f[3]=='0x2')add(f[1],f[4],'',f[0]);
+ let m=match(line,/^(\S+)\s+(\d+\.\d+\.\d+\.\d+).*lladdr\s+([0-9a-f:]+)/i);if(m)add(m[2],m[3],'',m[1]);
+ // Ethernet has "src > dst"; Linux cooked capture on any has "src ethertype".
+ let src=match(line,/^(\S+).* ([0-9a-f]{2}(:[0-9a-f]{2}){5})\s+(>|ethertype)/i);
+ let sender=match(line,/ARP,.*tell (169\.254\.\d+\.\d+)/i);
+ if(src&&sender)observed(sender[1],src[2],src[1],line,true);
+ let probe=match(line,/ARP,.*who-has (169\.254\.\d+\.\d+).*tell 0\.0\.0\.0/i);
+ if(src&&probe)observed(probe[1],src[2],src[1],line,false);
+ let reply=match(line,/^(\S+).*Reply (169\.254\.\d+\.\d+) is-at ([0-9a-f:]+)/i);
+ if(reply)observed(reply[2],reply[3],reply[1],line,true);
+ let ipv4=match(line,/IPv4.* (169\.254\.\d+\.\d+)(\.\d+)? > /i);
+ if(src&&ipv4)observed(ipv4[1],src[2],src[1],line,true);
+}
 for(let ip in split(readfile(dir+'/alive.txt')||'','\n')){ip=trim(ip);if(!ip)continue;let found=false;for(let k in keys(rows))if(rows[k].ip==ip){rows[k].active_seen=true;found=true;}if(!found)add(ip,'','','ICMP skan');}
-let result={running:false,updated:time(),scope:ARGV[2],hosts:values(rows),scopes:scopes,note:'ARP i klienci Wi-Fi nie pokazują wszystkich urządzeń. Brak DHCP może oznaczać IP statyczny. APIPA 169.254.0.0/16 jest wykrywana z tablic sąsiadów oraz 8-sekundowego nasłuchu ARP/IPv4 na LAN routera i dostępnych AP z tcpdump. Milczące urządzenie może pozostać niewidoczne. VPN warstwy 3 nie przenosi tego ruchu; zdalnie potrzebny jest dostęp do AP w danym LAN. Nie jest wykonywany ping całego /16.'};writefile(dir+'/result.json.next',sprintf('%J',result));
+let result={running:false,updated:time(),scope:ARGV[2],hosts:values(rows),scopes:scopes,note:'ARP i klienci Wi-Fi nie pokazują wszystkich urządzeń. Brak DHCP może oznaczać IP statyczny. APIPA 169.254.0.0/16 jest wykrywana z tablic sąsiadów oraz 8-sekundowego nasłuchu na LAN routera i 20-sekundowego nasłuchu wszystkich interfejsów dostępnych AP z tcpdump (także widocznych VLAN-ów). Milczące urządzenie może pozostać niewidoczne. VPN warstwy 3 nie przenosi tego ruchu; zdalnie potrzebny jest dostęp do AP w danym LAN. Nie jest wykonywany ping całego /16.'};writefile(dir+'/result.json.next',sprintf('%J',result));
