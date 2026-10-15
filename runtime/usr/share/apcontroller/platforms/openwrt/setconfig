@@ -38,11 +38,13 @@ wifi_ensure_vlan(){
 	links=$(uci -q get network.dev_guest.ports)
 	if [ -z "$guestports" ] || [ -z "$links" ]; then echo "VLAN $vid: układ portów tego AP wymaga jawnej konfiguracji/użycia dodatkowego skryptu" >&2; return 1; fi
 	primary=''
+	if [ "$(uci -q get network.bat0_eth.apcontroller_transport_mode)" = central ];then primary=$(uci -q get network.dev_batman.apcontroller_cpu);fi
 	for link in $(uci -q get network.dev_lan.ports); do case "$link" in eth*.1) primary=${link%.1}; break;; esac; done
 	[ -n "$primary" ] || { echo 'Nie znaleziono przewodowego interfejsu LAN; użyj jawnego dodatkowego skryptu' >&2; return 1; }
 	# One CPU/uplink path: bridging both CPU ports or wired and BATMAN creates a loop.
 	tagged=''; for port in $guestports; do [ "$port" = 6t ] || tagged="$tagged $port"; done
 	guestports=$tagged; links=$primary.12
+	if [ "$(uci -q get network.bat0_eth.apcontroller_transport_mode)" = central ];then links=bat0.12;fi
 	found=0
 	for sec in $(uci -q show network | sed -n 's/^network\.\([^=]*\)=switch_vlan$/\1/p'); do
 		[ "$(uci -q get network.$sec.vid)" != "$vid" ] || found=1
@@ -67,6 +69,10 @@ wifi_ensure_vlan(){
 	[ -n "$dev" ] || dev=apc_bridge_$net
 	uci set network.$dev=device; uci set network.$dev.name="$bridge"; uci set network.$dev.type=bridge
 	uci set network.$dev.stp=1; uci set network.$dev.forward_delay=2
+	if [ "$(uci -q get network.bat0_eth.apcontroller_transport_mode)" = central ];then
+		uci set network.$dev.apcontroller_fallback_port="$primary.$vid"
+		uci set network.apc_native_$vid=interface;uci set network.apc_native_$vid.proto=none;uci set network.apc_native_$vid.device="$primary.$vid"
+	fi
 	uci -q delete network.$dev.ports
 	for link in $links; do
 		case "$link" in *.12) base=${link%.12};; *) continue;; esac
@@ -491,6 +497,13 @@ fi
 #
 # Apply configuration
 #
+if [ "$(uci -q get network.bat0_eth.apcontroller_transport_mode)" = central ];then
+	for sec in $(uci -q show network | sed -n 's/^network\.\([^=]*\)=device$/\1/p');do
+		port=$(uci -q get network.$sec.apcontroller_fallback_port)
+		[ -n "$port" ] || continue
+		case " $(uci -q get network.$sec.ports) " in *" $port "*) uci -q del_list network.$sec.ports="$port";NEEDCOMMIT=1;;esac
+	done
+fi
 if [ "$NEEDCOMMIT" -eq 1 ] && { [ -n "$(uci -q changes wireless)" ] || [ -n "$(uci -q changes network)" ]; }; then
 	uci commit network || exit 1
 	uci commit wireless || exit 1

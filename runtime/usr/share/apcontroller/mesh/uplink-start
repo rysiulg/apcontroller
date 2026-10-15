@@ -1,5 +1,6 @@
 #!/bin/sh
 set -u
+if [ "$(uci -q get network.bat0_eth.apcontroller_transport_mode)" = central ];then exec /bin/sh /etc/apcontroller/batman/uplink-central "${1:-}";fi
 gateway=${APC_GATEWAY:-$(uci -q get network.lan.gateway)}
 if [ -z "$gateway" ] && [ -f /etc/apcontroller/pull/client.conf ];then . /etc/apcontroller/pull/client.conf;gateway=${MAIN:-};fi
 [ -n "$gateway" ] || exit 2

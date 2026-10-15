@@ -1,0 +1,51 @@
+#!/bin/sh
+set -u
+run=/tmp/apcontroller-uplink
+mkdir -p "$run";umask 077
+gateway=$(uci -q get network.batman_control.apcontroller_gateway)
+control=$(uci -q get network.batman_control.device)
+case "$gateway:$control" in *[!a-zA-Z0-9_.:-]*|:*) exit 2;;esac
+[ -n "$gateway" ] && [ -n "$control" ] && command -v arping >/dev/null || exit 2
+ports(){
+ : > "$run/ports.next"
+ for sec in $(uci -q show network | sed -n 's/^network\.\([^=]*\)=device$/\1/p');do
+  [ "$(uci -q get network.$sec.type)" = bridge ] || continue
+  bridge=$(uci -q get network.$sec.name);port=$(uci -q get network.$sec.apcontroller_fallback_port)
+  case "$bridge:$port" in br-*:eth*.[0-9]*) printf '%s %s\n' "$bridge" "$port" >> "$run/ports.next";;esac
+ done
+ sort -u "$run/ports.next" > "$run/ports";rm -f "$run/ports.next"
+}
+detach(){ while read -r bridge port;do [ ! -d "/sys/class/net/$bridge/brif/$port" ] || brctl delif "$bridge" "$port" 2>/dev/null;done < "$run/ports"; }
+attach(){ while read -r bridge port;do [ -d "/sys/class/net/$bridge" ] && [ -d "/sys/class/net/$port" ] || continue;[ -d "/sys/class/net/$bridge/brif/$port" ] || brctl addif "$bridge" "$port" 2>/dev/null;done < "$run/ports"; }
+probe(){ [ -d "/sys/class/net/$control" ] && arping -q -I "$control" -c 1 -w 2 "$gateway" >/dev/null 2>&1; }
+wired(){ detach;if [ "$(ubus call network.interface.bat0_eth status 2>/dev/null | jsonfilter -e '@.up')" != true ];then ifup bat0_eth >/dev/null 2>&1;fi; }
+status(){ [ "$state" = "$1" ] || logger -t apcontroller-uplink "BATMAN central: $1";state=$1;printf '%s\n' "$state" > "$run/status"; }
+cleanup(){ detach;printf 'stopped\n' > "$run/status";exit 0; }
+announce(){
+ local lan address
+ lan=$(uci -q get network.lan.device)
+ address=$(ip -4 addr show dev "$lan" 2>/dev/null | awk '/inet /{split($2,a,"/");print a[1];exit}')
+ [ -z "$address" ] || arping -U -q -I "$lan" -c 1 -w 1 "$address" >/dev/null 2>&1 || true
+}
+trap cleanup TERM INT HUP
+ports;[ -s "$run/ports" ] || exit 2
+state=starting;bad=0;good=0;refresh=0;signature=''
+if [ "${1:-}" = probe ];then if probe;then echo WIRED_TRANSPORT_PROBE_OK;exit 0;else echo WIRED_TRANSPORT_PROBE_FAILED;exit 1;fi;fi
+detach
+while :;do
+ current=$(cksum /etc/config/network)
+ if [ "$current" != "$signature" ];then ports;signature=$current;fi
+ if probe;then
+  bad=0;good=$((good+1))
+  if [ "$good" -ge 2 ];then [ "$state" = wired ] || refresh=3;wired;status wired;fi
+ else
+  good=0;bad=$((bad+1))
+  if [ "$bad" -ge 3 ];then
+   if [ "$state" != mesh ] || [ "$(ubus call network.interface.bat0_eth status 2>/dev/null | jsonfilter -e '@.up')" = true ];then ifdown bat0_eth >/dev/null 2>&1;fi
+   attach;status mesh
+  fi
+ fi
+ [ "$state" != wired ] || detach
+ if [ "$refresh" -gt 0 ] && [ "$state" = wired ];then announce;refresh=$((refresh-1));fi
+ sleep 2
+done
