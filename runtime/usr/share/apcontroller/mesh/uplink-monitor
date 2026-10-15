@@ -1,0 +1,69 @@
+#!/bin/sh
+set -u
+gateway=${1:-}
+run=/tmp/apcontroller-uplink
+mkdir -p "$run";umask 077
+case "$gateway" in ''|*[!0-9.]*) exit 2;;esac
+command -v tcpdump >/dev/null && command -v arping >/dev/null || exit 2
+lan=$(uci -q get network.lan.device)
+case "$lan" in br-*) ;;*)exit 2;;esac
+: > "$run/ports"
+for section in $(uci -q show network | sed -n 's/^network\.\([^=]*\)=device$/\1/p');do
+ [ "$(uci -q get network.$section.type)" = bridge ] || continue
+ bridge=$(uci -q get network.$section.name);ports=$(uci -q get network.$section.ports)
+ case " $ports " in *' bat0.'*) ;;*)continue;;esac
+ for port in $ports;do case "$port" in eth*.[0-9]*) printf '%s %s\n' "$bridge" "$port" >> "$run/ports";;esac;done
+done
+sort -u "$run/ports" > "$run/ports.next";mv "$run/ports.next" "$run/ports"
+probes=$(awk -v lan="$lan" '$1==lan{print $2}' "$run/ports")
+[ -n "$probes" ] || exit 2
+restore_ports(){
+ while read -r bridge port;do [ -d "/sys/class/net/$bridge" ] && [ -d "/sys/class/net/$port" ] || continue;[ -d "/sys/class/net/$bridge/brif/$port" ] || brctl addif "$bridge" "$port" 2>/dev/null;done < "$run/ports"
+}
+detach_ports(){
+ while read -r bridge port;do [ ! -d "/sys/class/net/$bridge/brif/$port" ] || brctl delif "$bridge" "$port" 2>/dev/null;done < "$run/ports"
+}
+cleanup(){ [ -z "${listener:-}" ] || kill "$listener" 2>/dev/null;ifdown bat0_eth >/dev/null 2>&1;restore_ports;printf 'stopped\n' > "$run/status";exit 0; }
+trap cleanup TERM INT HUP
+probe(){
+ local port="$1" mac code=0
+ [ -d "/sys/class/net/$port" ] || return 2
+ mac=$(cat "/sys/class/net/$port/address")
+ : > "$run/probe.txt"
+ tcpdump --immediate-mode -Q in -l -nne -c 1 -i "$port" "arp and arp[6:2]=2 and src host $gateway and ether dst $mac" > "$run/probe.txt" 2> "$run/probe.error" & listener=$!
+ sleep 1
+ kill -0 "$listener" 2>/dev/null || { wait "$listener" 2>/dev/null;listener='';return 2; }
+ arping -D -q -I "$port" -c 1 -w 1 "$gateway" >/dev/null 2>&1 || code=$?
+ sleep 1
+ kill "$listener" 2>/dev/null || true;wait "$listener" 2>/dev/null || true;listener=''
+ [ "$code" -le 1 ] || return 2
+ grep -q "Reply $gateway is-at " "$run/probe.txt"
+}
+if [ "${2:-}" = probe ];then
+ for port in $probes;do if probe "$port";then echo WIRED_PROBE_OK;exit 0;fi;done
+ echo WIRED_PROBE_FAILED;exit 1
+fi
+wire_transport(){
+ if [ "$state" != wired ] || ! batctl meshif bat0 interface | grep -q 'mesh0: active';then ifdown bat0_eth >/dev/null 2>&1;return;fi
+ if batctl meshif bat0 interface | grep -q 'br-bat: active';then
+  if ! batctl meshif bat0 mesh_json | grep -q '"hard_ifname"[[:space:]]*:[[:space:]]*"mesh0"';then ifdown bat0_eth >/dev/null 2>&1;fi
+ elif [ "$(ubus call network.interface.bat0_eth status | jsonfilter -e '@.autostart')" != true ];then ifup bat0_eth >/dev/null 2>&1;fi
+}
+ifdown bat0_eth >/dev/null 2>&1
+state=wired;fail=0;good=0;printf '%s\n' "$state" > "$run/status"
+while :;do
+ result=1
+ for port in $probes;do code=0;probe "$port" || code=$?;[ "$code" != 0 ] || { result=0;break; };[ "$code" != 2 ] || result=2;done
+ if [ "$result" = 0 ];then
+  fail=0;good=$((good+1))
+  if [ "$state" = mesh ] && [ "$good" -ge 2 ];then restore_ports;state=wired;printf '%s\n' "$state" > "$run/status";logger -t apcontroller-uplink 'WrĂłciĹ‚a przewodowa odpowiedĹş ARP routera; przywrĂłcono porty mostĂłw';fi
+ elif [ "$result" = 1 ];then
+  good=0;fail=$((fail+1))
+  if [ "$state" = wired ] && [ "$fail" -ge 3 ] && iw dev mesh0 station dump | grep -q ESTAB;then
+   ifdown bat0_eth >/dev/null 2>&1;detach_ports;state=mesh;printf '%s\n' "$state" > "$run/status";logger -t apcontroller-uplink 'Brak przewodowej odpowiedzi ARP routera; odĹ‚Ä…czono przewodowe porty mostĂłw, dziaĹ‚a zapas mesh'
+  fi
+ fi
+ [ "$state" != mesh ] || detach_ports
+ wire_transport
+ sleep 5
+done

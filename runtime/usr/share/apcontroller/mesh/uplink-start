@@ -1,0 +1,28 @@
+#!/bin/sh
+set -u
+gateway=${APC_GATEWAY:-$(uci -q get network.lan.gateway)}
+if [ -z "$gateway" ] && [ -f /etc/apcontroller/pull/client.conf ];then . /etc/apcontroller/pull/client.conf;gateway=${MAIN:-};fi
+[ -n "$gateway" ] || exit 2
+if ! command -v tcpdump >/dev/null;then
+ runtime=/tmp/apcontroller-uplink-runtime
+ if [ ! -f "$runtime/.ready" ] || [ ! -x "$runtime/usr/bin/tcpdump" ];then
+ while :;do
+  mkdir -p "$runtime/etc/apk/keys"
+  cp /etc/apk/keys/* "$runtime/etc/apk/keys/" 2>/dev/null || true
+  repo=$(awk 'index($0,"https://downloads.openwrt.org/")==1 && ($0 ~ "/base/packages.adb$" || $0 ~ "/targets/[^/]+/[^/]+/packages/packages.adb$"){print}' /etc/apk/repositories.d/distfeeds.list)
+  if [ -n "$repo" ];then
+   printf '%s\n' "$repo" > "$runtime/etc/apk/repositories"
+   if apk --root "$runtime" --arch "$(cat /etc/apk/arch)" --initdb --no-scripts --no-cache add tcpdump > /tmp/apcontroller-uplink-runtime.log 2>&1;then touch "$runtime/.ready";break;fi
+  fi
+  sleep 60
+ done
+ fi
+ mkdir -p "$runtime/bin"
+ cat > "$runtime/bin/tcpdump" <<'EOF'
+#!/bin/sh
+LD_LIBRARY_PATH=/tmp/apcontroller-uplink-runtime/usr/lib:/tmp/apcontroller-uplink-runtime/lib exec /tmp/apcontroller-uplink-runtime/usr/bin/tcpdump "$@"
+EOF
+ chmod 700 "$runtime/bin/tcpdump"
+ PATH="$runtime/bin:$PATH";export PATH
+fi
+exec /bin/sh /etc/apcontroller/batman/uplink-monitor "$gateway" "${1:-}"
