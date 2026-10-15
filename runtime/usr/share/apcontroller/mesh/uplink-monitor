@@ -56,11 +56,11 @@ while :;do
  for port in $probes;do code=0;probe "$port" || code=$?;[ "$code" != 0 ] || { result=0;break; };[ "$code" != 2 ] || result=2;done
  if [ "$result" = 0 ];then
   fail=0;good=$((good+1))
-  if [ "$state" = mesh ] && [ "$good" -ge 2 ];then restore_ports;state=wired;printf '%s\n' "$state" > "$run/status";logger -t apcontroller-uplink 'WrĂłciĹ‚a przewodowa odpowiedĹş ARP routera; przywrĂłcono porty mostĂłw';fi
+  if [ "$state" = mesh ] && [ "$good" -ge 2 ];then restore_ports;state=wired;printf '%s\n' "$state" > "$run/status";logger -t apcontroller-uplink 'Wróciła przewodowa odpowiedź ARP routera; przywrócono porty mostów';fi
  elif [ "$result" = 1 ];then
   good=0;fail=$((fail+1))
   if [ "$state" = wired ] && [ "$fail" -ge 3 ] && iw dev mesh0 station dump | grep -q ESTAB;then
-   ifdown bat0_eth >/dev/null 2>&1;detach_ports;state=mesh;printf '%s\n' "$state" > "$run/status";logger -t apcontroller-uplink 'Brak przewodowej odpowiedzi ARP routera; odĹ‚Ä…czono przewodowe porty mostĂłw, dziaĹ‚a zapas mesh'
+   ifdown bat0_eth >/dev/null 2>&1;detach_ports;state=mesh;printf '%s\n' "$state" > "$run/status";logger -t apcontroller-uplink 'Brak przewodowej odpowiedzi ARP routera; odłączono przewodowe porty mostów, działa zapas mesh'
   fi
  fi
  [ "$state" != mesh ] || detach_ports
