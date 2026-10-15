@@ -44,6 +44,11 @@ if [ "${2:-}" = probe ];then
  echo WIRED_PROBE_FAILED;exit 1
 fi
 wire_transport(){
+ # A separate wired BATMAN path is optional; normal LAN plus radio mesh is sufficient for failover.
+ if [ "$(uci -q get network.bat0_eth.apcontroller_wired_transport)" != 1 ];then
+  if batctl meshif bat0 interface | grep -q 'br-bat: active';then ifdown bat0_eth >/dev/null 2>&1;fi
+  return
+ fi
  if [ "$state" != wired ] || ! batctl meshif bat0 interface | grep -q 'mesh0: active';then ifdown bat0_eth >/dev/null 2>&1;return;fi
  if batctl meshif bat0 interface | grep -q 'br-bat: active';then
   if ! batctl meshif bat0 mesh_json | grep -q '"hard_ifname"[[:space:]]*:[[:space:]]*"mesh0"';then ifdown bat0_eth >/dev/null 2>&1;fi
