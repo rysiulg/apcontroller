@@ -19,7 +19,7 @@ for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
   rm -f /etc/apk/repositories.d/apcontroller.list
   awk '{if ($0 ~ /^(apcontroller|luci-apcontroller|luci-app-apcontroller|luci-i18n-apcontroller-pl|multivpn-connect|luci-app-multivpn-connect)[<>=~]/) sub(/[<>=~].*/, ""); print}' /etc/apk/world > "$tmp/world"
   cp "$tmp/world" /etc/apk/world
-  if apk update && apk add --upgrade luci-apcontroller luci-app-multivpn-connect sstp-client; then
+  if apk update && apk add --upgrade luci-apcontroller luci-app-multivpn-connect sstp-client luci-proto-sstp; then
    echo 'Custom packages restored from signed repository'
    for iface in $(uci -q show network | sed -n 's/^network\.\([^=]*\)=interface$/\1/p'); do
     if [ "$(uci -q get network.$iface.proto)" = sstp ] && [ "$(uci -q get network.$iface.auto)" != 0 ]; then ifdown "$iface"; ifup "$iface"; fi
